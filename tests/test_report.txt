@@ -1,0 +1,28 @@
+INCIDENT REPORT - TRAINING EXERCISE [FICTIONAL TEST DATA]
+
+DTG: 172347MAY26
+LOCATION: Training Area 7, vicinity grid 18S TJ 12345 67890
+UNIT: 2nd Platoon, B Company, 1-100 IN BN
+INCIDENT TYPE: Trainee separation during night land navigation
+
+NARRATIVE:
+At approximately 2230 local, Trainee SMITH, J. (E-2) was reported overdue
+at checkpoint Charlie during the night land navigation exercise. Initial
+search of last-known route was initiated at 2245 by squad leader SGT JONES.
+Trainee was located at 2310 approximately 400m east of expected route,
+disoriented and dehydrated but otherwise uninjured. Medic on scene cleared
+trainee for transport. Trainee was transported to aid station for evaluation.
+
+Weather conditions at time of incident: light rain, visibility 200m, temp 14C,
+wind from NNW at 8kt. Lunar illumination 12%.
+
+Cross-reference: see also report TR-5/2026 (related land nav incident,
+same training area, dated 14MAR26). Conditions tonight appear to violate
+the visibility and lunar-illumination thresholds in battalion SOP 7-2-3
+(weather triggers for outdoor training).
+
+STATUS: Trainee released to unit at 0145, training continues with modified
+night nav route. Recommend review of route marking adequacy and consider
+codifying a weather-trigger pause threshold for future night nav iterations.
+
+REPORTING NCO: SFC WILSON, M.

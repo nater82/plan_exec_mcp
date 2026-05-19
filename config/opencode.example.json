@@ -1,0 +1,31 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "planner-mcp-heavy": {
+      "type": "local",
+      "command": [
+        "__GENAI_MCP_DIR__/.venv/bin/python",
+        "__GENAI_MCP_DIR__/server.py"
+      ],
+      "enabled": true,
+      "timeout": 240000,
+      "environment": {
+        "PYTHONPATH": "__GENAI_MCP_DIR__",
+        "PLANNER_TOOL_STYLE": "heavy"
+      }
+    },
+    "planner-mcp-light": {
+      "type": "local",
+      "command": [
+        "__GENAI_MCP_DIR__/.venv/bin/python",
+        "__GENAI_MCP_DIR__/server.py"
+      ],
+      "enabled": false,
+      "timeout": 240000,
+      "environment": {
+        "PYTHONPATH": "__GENAI_MCP_DIR__",
+        "PLANNER_TOOL_STYLE": "light"
+      }
+    }
+  }
+}

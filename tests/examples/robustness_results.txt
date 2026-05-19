@@ -1,0 +1,431 @@
+
+======================================================================
+=== trainee_separation ===
+======================================================================
+HTTP 200  (19.1s, in=989 out=557)
+Valid JSON: True  clean: True
+Severity: elevated  human_review: True  steps: 6
+Tools used: ['draft_report', 'grep_files', 'post_alert', 'read_file', 'web_fetch']
+Tools NOT used: []
+
+--- PLAN ---
+{
+  "severity": "elevated",
+  "summary": "Trainee separated during night land navigation in TA-7, found disoriented and dehydrated, evaluated and released.",
+  "human_review_required": true,
+  "review_reason": "Trainee separation requiring medical evaluation and proposed changes to safety SOPs regarding route marking and weather triggers.",
+  "steps": [
+    {
+      "id": 1,
+      "intent": "Read source incident report into context",
+      "tool": "read_file",
+      "args": {
+        "path": "/reports/incoming/<incident-filename>"
+      },
+      "depends_on": []
+    },
+    {
+      "id": 2,
+      "intent": "Pull referenced prior document TR-5/2026 on related land nav incident",
+      "tool": "read_file",
+      "args": {
+        "path": "/references/TR-5-2026.md"
+      },
+      "depends_on": []
+    },
+    {
+      "id": 3,
+      "intent": "Look up weather and illumination conditions for TA-7 around 2230 local to corroborate",
+      "tool": "web_fetch",
+      "args": {
+        "url": "<lookup-needed:weather-api-for-TA-7-coords-on-172230MAY26>"
+      },
+      "depends_on": []
+    },
+    {
+      "id": 4,
+      "intent": "Check for prior trainee separation or land nav reports in TA-7 to detect patterns",
+      "tool": "grep_files",
+      "args": {
+        "pattern": "(TA-7|Training Area 7).*(separation|overdue|land nav)",
+        "path": "/reports/"
+      },
+      "depends_on": []
+    },
+    {
+      "id": 5,
+      "intent": "Post info-level notification to training safety channel",
+      "tool": "post_alert",
+      "args": {
+        "channel": "safety-officer",
+        "severity": "info",
+        "message": "Elevated incident: Trainee separation during night land nav at TA-7. Trainee recovered and cleared. Triage in progress."
+      },
+      "depends_on": [
+        1
+      ]
+    },
+    {
+      "id": 6,
+      "intent": "Draft safety officer notification with full context covering incident and policy review recommendations",
+      "tool": "draft_report",
+      "args": {
+        "template": "safety_officer_notification",
+        "fields": {
+          "incident_type": "trainee_separation",
+          "injury_summary": "disoriented_dehydrated",
+          "personnel": "Trainee SMITH, J."
+        }
+      },
+      "depends_on": [
+        1,
+        2,
+        3,
+        4
+      ]
+    }
+  ]
+}
+
+======================================================================
+=== vehicle_accident ===
+======================================================================
+HTTP 200  (65.2s, in=1054 out=594)
+Valid JSON: True  clean: True
+Severity: high  human_review: True  steps: 6
+Tools used: ['draft_report', 'grep_files', 'post_alert', 'read_file', 'web_fetch']
+Tools NOT used: []
+
+--- PLAN ---
+{
+  "severity": "high",
+  "summary": "LMTV rollover on MSR Tan in wet conditions. Two personnel medically evacuated with injuries, vehicle NMC. 15-6 investigation initiated.",
+  "human_review_required": true,
+  "review_reason": "Vehicle rollover with medical evacuation and formal 15-6 investigation necessitates immediate command and safety officer review.",
+  "steps": [
+    {
+      "id": 1,
+      "intent": "Read source incident report into context",
+      "tool": "read_file",
+      "args": {
+        "path": "/reports/incoming/incident_180645MAY26.txt"
+      },
+      "depends_on": []
+    },
+    {
+      "id": 2,
+      "intent": "Pull referenced prior near-miss document NM-2026-09 regarding the MSR Tan curve",
+      "tool": "read_file",
+      "args": {
+        "path": "/references/NM-2026-09.md"
+      },
+      "depends_on": []
+    },
+    {
+      "id": 3,
+      "intent": "Look up weather and road condition data for MSR Tan grid 18S TJ 22100 71400 at 0612",
+      "tool": "web_fetch",
+      "args": {
+        "url": "<lookup-needed:weather-api-for-MSR-Tan-coords-on-180612MAY26>"
+      },
+      "depends_on": []
+    },
+    {
+      "id": 4,
+      "intent": "Check for other accident or near-miss reports on MSR Tan to identify historical patterns",
+      "tool": "grep_files",
+      "args": {
+        "pattern": "(MSR Tan).*(rollover|accident|near-miss)",
+        "path": "/reports/"
+      },
+      "depends_on": []
+    },
+    {
+      "id": 5,
+      "intent": "Post high-level notification to command and safety channel",
+      "tool": "post_alert",
+      "args": {
+        "channel": "command-safety",
+        "severity": "high",
+        "message": "High severity incident: LMTV rollover on MSR Tan, two MEDEVAC'd, 15-6 initiated. Triage in progress."
+      },
+      "depends_on": [
+        1
+      ]
+    },
+    {
+      "id": 6,
+      "intent": "Draft initial safety officer notification and 15-6 context packet",
+      "tool": "draft_report",
+      "args": {
+        "template": "safety_officer_notification",
+        "fields": {
+          "incident_type": "vehicle_rollover",
+          "injury_summary": "medevac_fracture_and_neck_pain",
+          "personnel": "SGT GARCIA, SPC LEE",
+          "investigation": "15-6 initiated"
+        }
+      },
+      "depends_on": [
+        1,
+        2,
+        3,
+        4
+      ]
+    }
+  ]
+}
+
+======================================================================
+=== heat_casualty ===
+======================================================================
+HTTP 200  (31.2s, in=1075 out=604)
+Valid JSON: True  clean: True
+Severity: critical  human_review: True  steps: 6
+Tools used: ['draft_report', 'post_alert', 'read_file', 'web_fetch']
+Tools NOT used: ['grep_files']
+
+--- PLAN ---
+{
+  "severity": "critical",
+  "summary": "Trainee hospitalized for heat stroke during land nav lane; suspected WBGT Black Flag SOP violation.",
+  "human_review_required": true,
+  "review_reason": "Severe medical emergency requiring hospital admission and indication of cadre failure to suspend training during Black Flag conditions.",
+  "steps": [
+    {
+      "id": 1,
+      "intent": "Read source incident report into context",
+      "tool": "read_file",
+      "args": {
+        "path": "/reports/incoming/<incident-filename>"
+      },
+      "depends_on": []
+    },
+    {
+      "id": 2,
+      "intent": "Pull referenced prior document HEAT-2025-04 for similar case context",
+      "tool": "read_file",
+      "args": {
+        "path": "/references/HEAT-2025-04.md"
+      },
+      "depends_on": []
+    },
+    {
+      "id": 3,
+      "intent": "Pull referenced battalion heat category SOP dated 01APR26 to check compliance rules",
+      "tool": "read_file",
+      "args": {
+        "path": "/docs/sops/battalion_heat_category_SOP_01APR26.pdf"
+      },
+      "depends_on": []
+    },
+    {
+      "id": 4,
+      "intent": "Verify range control WBGT logs for Training Area 4 around 1245-1400 on 19MAY26",
+      "tool": "web_fetch",
+      "args": {
+        "url": "<lookup-needed:range-control-wbgt-logs-TA-4-19MAY26>"
+      },
+      "depends_on": []
+    },
+    {
+      "id": 5,
+      "intent": "Post critical notification to command and safety channels regarding MEDEVAC and SOP violation",
+      "tool": "post_alert",
+      "args": {
+        "channel": "command-safety-net",
+        "severity": "critical",
+        "message": "Critical incident: Trainee hospitalized for heat stroke at TA-4. Preliminary findings indicate Black Flag conditions were active. Review initiated."
+      },
+      "depends_on": [
+        1
+      ]
+    },
+    {
+      "id": 6,
+      "intent": "Draft initial CCIR and safety officer review incorporating SOP guidelines and prior case data",
+      "tool": "draft_report",
+      "args": {
+        "template": "ccir_safety_review",
+        "fields": {
+          "incident_type": "heat_casualty_hospitalization",
+          "injury_summary": "heat_stroke_104_2F",
+          "personnel": "Trainee BROWN, A."
+        }
+      },
+      "depends_on": [
+        1,
+        2,
+        3,
+        4
+      ]
+    }
+  ]
+}
+
+======================================================================
+=== weapon_malfunction ===
+======================================================================
+HTTP 200  (20.1s, in=1015 out=507)
+Valid JSON: True  clean: True
+Severity: elevated  human_review: True  steps: 5
+Tools used: ['draft_report', 'grep_files', 'post_alert', 'read_file']
+Tools NOT used: ['web_fetch']
+
+--- PLAN ---
+{
+  "severity": "elevated",
+  "summary": "M4A1 malfunction with possible barrel obstruction on Range 8; weapon impounded, no injuries.",
+  "human_review_required": true,
+  "review_reason": "Second similar barrel obstruction this cycle requires armorer inspection and potential pre-fire procedure review.",
+  "steps": [
+    {
+      "id": 1,
+      "intent": "Read source incident report into context",
+      "tool": "read_file",
+      "args": {
+        "path": "/reports/incoming/<incident-filename>"
+      },
+      "depends_on": []
+    },
+    {
+      "id": 2,
+      "intent": "Pull referenced prior incident document WMR-2026-018 regarding similar barrel obstruction",
+      "tool": "read_file",
+      "args": {
+        "path": "/references/WMR-2026-018.md"
+      },
+      "depends_on": []
+    },
+    {
+      "id": 3,
+      "intent": "Search armory maintenance logs for history on M4A1 serial M4-024815",
+      "tool": "grep_files",
+      "args": {
+        "pattern": "M4-024815",
+        "path": "/logs/armory/"
+      },
+      "depends_on": []
+    },
+    {
+      "id": 4,
+      "intent": "Post info-level notification to armorer channel regarding impounded weapon",
+      "tool": "post_alert",
+      "args": {
+        "channel": "armory-ops",
+        "severity": "info",
+        "message": "Elevated incident: Impounded M4A1 (M4-024815) from Range 8 for possible barrel obstruction. Pending physical inspection."
+      },
+      "depends_on": [
+        1
+      ]
+    },
+    {
+      "id": 5,
+      "intent": "Draft recommendation report for safety review of weapons maintenance procedures",
+      "tool": "draft_report",
+      "args": {
+        "template": "safety_procedure_review",
+        "fields": {
+          "incident_type": "weapon_malfunction_obstruction",
+          "weapon_serial": "M4-024815",
+          "prior_incident": "WMR-2026-018"
+        }
+      },
+      "depends_on": [
+        1,
+        2,
+        3
+      ]
+    }
+  ]
+}
+
+======================================================================
+=== negligent_discharge ===
+======================================================================
+HTTP 200  (30.7s, in=1099 out=479)
+Valid JSON: True  clean: True
+Severity: high  human_review: True  steps: 5
+Tools used: ['draft_report', 'grep_files', 'post_alert', 'read_file']
+Tools NOT used: ['web_fetch']
+
+--- PLAN ---
+{
+  "severity": "high",
+  "summary": "Negligent discharge of M4A1 into clearing barrel at Range 14, no injuries.",
+  "human_review_required": true,
+  "review_reason": "Negligent discharge requires chain of command review, unit-wide safety stand-down, and formal AAR.",
+  "steps": [
+    {
+      "id": 1,
+      "intent": "Read source incident report into context",
+      "tool": "read_file",
+      "args": {
+        "path": "/reports/incoming/<incident-filename>"
+      },
+      "depends_on": []
+    },
+    {
+      "id": 2,
+      "intent": "Pull referenced prior document DCH-2025-11 regarding previous battalion ND",
+      "tool": "read_file",
+      "args": {
+        "path": "/references/DCH-2025-11.md"
+      },
+      "depends_on": []
+    },
+    {
+      "id": 3,
+      "intent": "Check current range SOPs for clearing barrel cadre supervision ratios to support the recommendation review",
+      "tool": "grep_files",
+      "args": {
+        "pattern": "clearing barrel.*(ratio|supervision)",
+        "path": "/sops/range/"
+      },
+      "depends_on": []
+    },
+    {
+      "id": 4,
+      "intent": "Post high-severity notification to command and safety channels",
+      "tool": "post_alert",
+      "args": {
+        "channel": "command-safety",
+        "severity": "high",
+        "message": "High severity incident: ND of M4A1 at Range 14 clearing barrel. No injuries. Trainee removed from line, unit safety stand-down directed."
+      },
+      "depends_on": [
+        1
+      ]
+    },
+    {
+      "id": 5,
+      "intent": "Draft formal AAR framework for the recommended 72-hour follow-up incorporating prior ND context",
+      "tool": "draft_report",
+      "args": {
+        "template": "formal_aar",
+        "fields": {
+          "incident_type": "negligent_discharge",
+          "personnel": "PFC NGUYEN, T.",
+          "weapon": "M4A1",
+          "location": "Range 14"
+        }
+      },
+      "depends_on": [
+        1,
+        2,
+        3
+      ]
+    }
+  ]
+}
+
+======================================================================
+=== SUMMARY ===
+======================================================================
+report                 valid  steps  sev        review  time(s)  tools_used
+trainee_separation     True   6      elevated   True    19.1     ['draft_report', 'grep_files', 'post_alert', 'read_file', 'web_fetch']
+vehicle_accident       True   6      high       True    65.2     ['draft_report', 'grep_files', 'post_alert', 'read_file', 'web_fetch']
+heat_casualty          True   6      critical   True    31.2     ['draft_report', 'post_alert', 'read_file', 'web_fetch']
+weapon_malfunction     True   5      elevated   True    20.1     ['draft_report', 'grep_files', 'post_alert', 'read_file']
+negligent_discharge    True   5      high       True    30.7     ['draft_report', 'grep_files', 'post_alert', 'read_file']
