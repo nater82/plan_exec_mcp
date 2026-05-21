@@ -95,14 +95,17 @@ git clone git@github.com:nater82/plan_exec_mcp.git
 cd plan_exec_mcp
 export GENAI_MIL_API_KEY=your-key   # add to ~/.bashrc to persist
 
-# 2. Interactive setup: venv, deps, templated opencode.json, healthcheck
+# 2. Interactive setup: venv, deps, global MCP registration, providers,
+#    healthcheck. It offers to add the provider blocks for you (a safe merge
+#    that won't touch providers you already have).
 python3 scripts/setup.py
 
-# 3. Wire the providers globally (one time — only if you don't already
-#    have these providers in your OpenCode config)
-cp config/providers.example.json ~/.config/opencode/opencode.json
+# 3. Edit the placeholder endpoint URLs that setup added for org-gptoss /
+#    org-gemma in ~/.config/opencode/opencode.json — point them at your
+#    real on-prem models.
 
-# 4. Use it — the MCP works for any task that needs research/synthesis/drafting:
+# 4. Use it, from any directory. The --model is the EXECUTOR — a LOCAL model
+#    that runs on your machine; never a genai-mil/gemini-* model.
 opencode run --model org-gptoss/openai/gpt-oss-120b \
   "Process the incident report at tests/test_report.txt and produce a safety officer notification."
 
@@ -111,13 +114,21 @@ opencode run --model org-gptoss/openai/gpt-oss-120b \
   "Read AGENTS.md and server.py and produce an architectural overview for a new contributor."
 ```
 
-The MCP is **self-contained** — no global config changes required. Heavy
-tool descriptions push both GPT-OSS 120B and Gemma 4 31B to engage the
-MCP naturally on substantive tasks (incident reports, multi-source
-synthesis, formatted artifacts) and to correctly skip it on trivial ones
-(one-line lookups, simple summaries). Every plan the planner emits ends
-with `synthesize` and `draft_output` calls, so the executor's
-"execute the plan" mode drives completion automatically.
+The MCP is **self-contained** — it needs no `AGENTS.md` to function (you do
+register it once in OpenCode's config; see setup). Heavy tool descriptions
+push both GPT-OSS 120B and Gemma 4 31B to engage the MCP naturally on
+substantive tasks (incident reports, multi-source synthesis, formatted
+artifacts) and to correctly skip it on trivial ones (one-line lookups,
+simple summaries). Every plan the planner emits ends with `synthesize` and
+`draft_output` calls, so the executor's "execute the plan" mode drives
+completion automatically.
+
+**The executor vs. the planner.** The model you pass to `--model` (or pick
+via `/models` in an interactive session) is the **executor** — it runs on
+your machine and does the tool calls. It must be a **local/on-prem** model.
+Gemini is the **planner**, reached by the MCP server internally; you never
+select it with `--model`. Passing a `genai-mil/gemini-*` model as the
+executor breaks local file access — Gemini runs remotely.
 
 `config/AGENTS.example.md` is an **optional** executor-side system-prompt
 addendum. It nudges the executor harder on borderline tasks (e.g.
@@ -169,9 +180,10 @@ opencode run --model org-gptoss/openai/gpt-oss-120b \
 - **Synthesize and draft_output occasionally fail with JSON parse errors** when the executor injects chat-template tokens into the args (e.g. GPT-OSS's `<|...` Harmony tokens, Gemma's `<|"|`). The executor usually recovers by writing the analysis itself; quality is often still good. Worst case: re-run, or use a different executor.
 - **First Gemini call after idle returns HTTP 401 "key locked".** The unlock URL appears in the error body. Click it once, key is re-enabled. Re-run `scripts/healthcheck.py` to confirm.
 - **2-3 min wall time is normal** for a full pipeline. The 30-60s opaque pause during `synthesize` is expected — the model is working, not stuck. If a single tool is stuck >90s, suspect network or rate limits.
-- **Gemma 4 31B's tool-call reliability is flaky on complex args.** For heavy synthesize/draft_output calls, prefer GPT-OSS 120B. Gemma's fine for simpler steps.
+- **GPT-OSS 120B is the supported executor.** Gemma 4 31B cannot reliably drive the planner-mcp: it fails the `get_plan` tool call with malformed-tool-call errors and falls back to handling the task on its own (often with chat-template token leakage in the output). Use `org-gptoss/openai/gpt-oss-120b` or an equivalent capable model as the executor; treat Gemma as unsupported for the MCP workflow.
 - **`triage_only` is incident-shaped only.** For research, summarization, code, document analysis tasks, the executor skips it and goes straight to `get_plan`. That's correct.
 - **Restart OpenCode after editing `~/.config/opencode/opencode.json`** — the MCP block is read at startup, not hot-reloaded.
+- **Headless `opencode run` from a script needs stdin redirected.** OpenCode 1.4.3 blocks reading stdin to EOF at startup when stdin is not a TTY (`run.ts` does `await Bun.stdin.text()`). Typed interactively in a terminal it's fine — stdin is a TTY. But from a script, cron, CI, or any non-interactive launcher that leaves stdin open, append `< /dev/null`: `opencode run --model … "prompt" < /dev/null`. Without it the process hangs at startup before doing anything — no output, no error.
 
 **To iterate on prompt quality:** edit `planner_prompt.py` (the EXAMPLE is
 the primary anchor — see `tests/iterations/README.md` for why) and rerun
@@ -207,10 +219,20 @@ Gemini Flash roughly halves their latency at some loss of output quality.
 | `PLANNER_MODEL_<TOOL>` | — | Per-tool override. `<TOOL>` ∈ `GET_PLAN`, `CONSULT_PLANNER`, `SYNTHESIZE`, `DRAFT_OUTPUT`, `TRIAGE_ONLY`. |
 | `PLANNER_TOOL_STYLE` | `heavy` | `heavy` or `light` tool descriptions. |
 | `PLANNER_HTTP_TIMEOUT` | `180` | Seconds before the genai.mil request times out. |
+| `PLANNER_ALLOW_INFO_REQUESTS` | `1` | When on, `synthesize` may return a `needs_more_info` request that the executor fulfills and re-calls. Set to `0` to force a single-pass synthesis with no round-trip — useful for one-shot runs or latency-sensitive automation where the extra executor turns are undesirable. |
 | `PLANNER_MCP_TOOL_PREFIX` | `planner-mcp-heavy_` | The prefix OpenCode uses for this MCP's tools (matches whatever name you registered it under in `opencode.json`). The planner uses this to name the synthesize/draft steps in plans. If your MCP block is named differently (e.g. `planner-mcp-light` or just `planner`), set this to that name with a trailing underscore. |
 
 ## Design notes
 
+- **Why the MCP reads files itself (incl. PDF/Office).** `synthesize` and
+  `get_plan`'s `input_files` take file *paths*; the MCP server reads them.
+  For `.pdf/.docx/.xlsx/.pptx` it parses the document into text server-side
+  (`pypdf`, `python-docx`, `openpyxl`, `python-pptx`). The weak executor
+  never has to read or parse a document — it just hands over a path. This
+  exists because executors mangle large file contents when ferrying them,
+  and cannot parse compressed formats (a raw byte read of a PDF/Office file
+  is unrecoverable garbage — verified). If a parser library is missing the
+  server returns a clear "install X" marker rather than crashing.
 - **Why session memory?** Without it, every tool call after `get_plan` has
   to re-pass `user_intent`, `input_text`, and the plan. Wire-level prompt
   sizes balloon as step_results accumulate. Session memory keeps the

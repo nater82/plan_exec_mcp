@@ -17,7 +17,8 @@ running, follow the steps below.
 
 - A local clone of this repo at a path of your choosing.
 - A working Python virtualenv with the MCP server installed.
-- A local `opencode.json` and `AGENTS.md` configured for your machine.
+- The planner-mcp registered in your **global** OpenCode config, so it
+  loads in every OpenCode session regardless of which directory you run from.
 - OpenCode installed and able to call the MCP, which calls Gemini, which
   thinks for you while OpenCode does the local work.
 
@@ -48,12 +49,15 @@ This is interactive — it asks before each significant step. It will:
 
 1. Create a Python virtualenv at `.venv/`
 2. Install the MCP server's dependencies
-3. Generate a working `opencode.json` from the template (with your repo path)
-4. Copy `AGENTS.example.md` to `AGENTS.md`
-5. Run a healthcheck against the genai.mil endpoint
+3. Register the planner-mcp in your **global** OpenCode config
+   (`~/.config/opencode/opencode.json`) — so it loads from any directory
+4. Offer to add the example provider blocks to that same global config
+   (a safe merge — it never overwrites providers you already have)
+5. Copy `AGENTS.example.md` to `AGENTS.md`
+6. Run a healthcheck against the genai.mil endpoint
 
-If step 5 says `GENAI_MIL_API_KEY is NOT set`, do step 3 below and re-run
-the script.
+If the healthcheck step says `GENAI_MIL_API_KEY is NOT set`, do **Step 3
+below** and re-run the script.
 
 ## Step 3. Set your API key (one time, persistent)
 
@@ -87,24 +91,42 @@ opencode --version
 (If `npm` isn't installed, see [docs/WSL_SETUP.md](docs/WSL_SETUP.md) Step 3
 for the Node.js install.)
 
-## Step 5. Wire the providers into OpenCode (one time, global)
+## Step 5. Point the executor providers at your real endpoints
 
-OpenCode needs to know how to talk to the genai.mil endpoint (for the
-planner-mcp's brain) and your on-prem/local executor models (for the
-local tool execution). Copy our provider template into your OpenCode
-global config — then edit the placeholder URLs in the provider template
-to point at the actual endpoints your org provides:
+The setup script's Step 4 offered to add the **provider** blocks to your
+global config (`~/.config/opencode/opencode.json`) — the executor models
+OpenCode runs on your machine. It's a safe merge: it only adds providers
+you didn't already have, and never overwrites an existing block.
 
-```sh
-mkdir -p ~/.config/opencode
-cp config/providers.example.json ~/.config/opencode/opencode.json
-```
+**If you let setup add them**, your only remaining task is to edit the
+placeholder endpoint URLs. Open `~/.config/opencode/opencode.json` and
+replace the `baseURL`s for `org-gptoss` and `org-gemma` with your real
+on-prem endpoints.
 
-If you already have a `~/.config/opencode/opencode.json` you don't want to
-overwrite, open both files in an editor and merge the `provider` blocks
-manually.
+**If you declined** (e.g. you already maintain your own provider blocks),
+merge the `provider` block from `config/providers.example.json` into the
+global config by hand — keep the existing `mcp` block and any providers you
+already have.
+
+The template ships three providers:
+
+- `org-gptoss` and `org-gemma` — your **local/on-prem executor** models.
+  **Required.** Edit their `baseURL`s to your real endpoints.
+- `genai-mil` — **optional.** Only needed if you want to chat with Gemini
+  *directly* in OpenCode. The planner-mcp does **not** use this block — the
+  MCP server reaches genai.mil on its own using `GENAI_MIL_API_KEY`. You
+  can delete this provider if you only want the planner-mcp workflow.
+
+See [config/README.md](config/README.md) for the full provider reference.
 
 ## Step 6. Try it
+
+> **The `--model` you pass is the EXECUTOR** — the model that runs on your
+> machine and does the tool calls (reading files, running code). It must be
+> a **local/on-prem** model such as `org-gptoss/openai/gpt-oss-120b`. Do
+> **not** pass a `genai-mil/gemini-*` model: Gemini runs remotely and cannot
+> read your local files or run anything on your device. Gemini is used
+> internally by the MCP — you never select it with `--model`.
 
 ```sh
 opencode run --model org-gptoss/openai/gpt-oss-120b \
@@ -125,8 +147,16 @@ This will take about 2-3 minutes. You should see:
 - Some tool execution (Read, Grep, etc.).
 - A final notification in your terminal.
 
-If it works, you're done with setup. From now on you can use any model in
-the `providers.example.json` list and any prompt.
+If it works, you're done with setup. The MCP is registered globally, so it
+works from any directory — `cd` to wherever your real files live and run
+`opencode` there.
+
+For **interactive** OpenCode sessions (not `opencode run`), the executor is
+whatever the `model` field in your config defaults to. If that default is a
+remote/cloud model, switch to a local executor with the `/models` command
+once OpenCode opens — otherwise file reads and on-device execution won't
+work. For a recurring workspace, drop a small `opencode.json` in that folder
+with `"model": "org-gptoss/openai/gpt-oss-120b"` so it defaults correctly.
 
 ## What to do if something breaks
 
@@ -136,8 +166,10 @@ the `providers.example.json` list and any prompt.
 | Healthcheck says `401 unauthorized` | Your key is locked. Visit the URL the error provides, or contact whoever issued the key. |
 | Healthcheck says `404 not found` for a model | A model name has changed. Edit `server.py`'s `_TOOL_MODEL_DEFAULTS`, or override via the `PLANNER_MODEL_*` env vars. |
 | `opencode: command not found` | Step 4 didn't complete. Re-run, check for npm permission errors. |
-| `opencode run` says model not found | Did Step 5. Restart your terminal so `opencode` picks up the new config. |
-| OpenCode runs but doesn't use the MCP | Check that `opencode.json` is in the working directory you're running `opencode` from. The setup script puts it at the repo root. |
+| `opencode run` says model not found | Did Step 5 (provider blocks merged into the global config). Restart OpenCode so it picks up the new config. |
+| `opencode run` errors with "Missing authorization" / 401 | Only happens if you use the optional `genai-mil` provider directly. Check that block references `{env:GENAI_MIL_API_KEY}` — exact spelling, underscores included — and that the var is set in your shell. The planner-mcp itself does not use this provider block. |
+| OpenCode runs but doesn't use the MCP | Confirm Step 2 registered it: `grep planner-mcp ~/.config/opencode/opencode.json`. Restart OpenCode — the `mcp` block is read at startup. |
+| Files can't be read / "passing files" fails | You're probably running with a remote model as the executor. The `--model` (or interactive default) must be a **local** model — see the callout in Step 6. |
 | MCP runs but Gemini calls time out | Network — confirm you can reach `https://api.genai.mil` from this terminal: `curl -I https://api.genai.mil/v1/models`. |
 
 If you're stuck, run the healthcheck explicitly and paste the output to

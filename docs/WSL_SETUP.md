@@ -117,13 +117,25 @@ The script will:
 
 - Create a Python virtual environment in `.venv/`
 - Install the MCP server's dependencies
-- Generate a working `opencode.json` and `AGENTS.md` from the templates in
-  `config/` (with the absolute path to your clone of the repo)
+- Register the planner-mcp in your **global** OpenCode config
+  (`~/.config/opencode/opencode.json`) so it loads from any directory
+- Offer to add the example provider blocks to that same global config
+  (a safe merge — it never overwrites providers you already have)
+- Copy `AGENTS.example.md` to `AGENTS.md`
 - Run a healthcheck against the genai.mil endpoint to verify your key works
 
-Follow the script's output — it tells you the next command to run.
+Follow the script's output. If you let it add the provider blocks, your one
+remaining config task is to edit the placeholder endpoint URLs in
+`~/.config/opencode/opencode.json` so they point at the models your org
+hosts — see [SETUP.md](../SETUP.md) Step 5.
 
 ## Step 8. Try it
+
+> **The `--model` is the EXECUTOR** — a model that runs on your machine and
+> does the file reads / code execution. Use a **local** model
+> (`org-gptoss/...`). Never pass a `genai-mil/gemini-*` model: Gemini runs
+> remotely and can't touch your local files. The MCP uses Gemini internally
+> on its own.
 
 ```sh
 opencode run --model org-gptoss/openai/gpt-oss-120b \
@@ -152,10 +164,18 @@ produce a structured output. Takes 2-3 minutes end-to-end.
 - Run `sudo add-apt-repository ppa:deadsnakes/ppa && sudo apt update && sudo apt install -y python3.12 python3.12-venv`, then use `python3.12` instead of `python3` in subsequent commands.
 
 ### `opencode run` says "model not found"
-- The `org-gptoss` and `genai-mil` providers need to be configured in your
-  OpenCode config. See `config/README.md` in this repo — copy
-  `config/providers.example.json` to `~/.config/opencode/opencode.json`
-  (or merge into your existing one).
+- The executor providers (`org-gptoss`, `org-gemma`) aren't in your OpenCode
+  config yet. Merge the `provider` blocks from `config/providers.example.json`
+  into `~/.config/opencode/opencode.json` and edit the placeholder URLs. See
+  `config/README.md`. (The `genai-mil` provider is optional — the MCP doesn't
+  need it.)
+
+### `opencode` reads no files / can't "pass files" to the model
+- Your executor is a remote model. The `--model` you pass — or, for an
+  interactive session, the default `model` in your config — must be a
+  **local** model. A remote model can't read your local filesystem. Pass
+  `--model org-gptoss/...`, or switch with `/models` in an interactive
+  session.
 
 ### `opencode run` errors with `unauthorized` or `401`
 - Your `GENAI_MIL_API_KEY` is missing, wrong, or your key has been locked.

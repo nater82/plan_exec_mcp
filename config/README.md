@@ -8,8 +8,8 @@ and adapt.
 
 | File | What it is |
 |---|---|
-| `providers.example.json` | Provider definitions: the genai.mil endpoint (Gemini Pro + Flash for the planner side) and two example local/on-prem executor providers (`org-gptoss` and `org-gemma`) with placeholder URLs. **Replace the placeholder URLs with whatever your organization actually hosts** — Ollama, vLLM, llama.cpp, an internal LLM gateway, anything OpenAI-compatible. Merge into your `~/.config/opencode/opencode.json` under `provider`. |
-| `opencode.example.json` | MCP registration template. Wires this repo's `server.py` into OpenCode. Replace `__GENAI_MCP_DIR__` with the absolute path to your clone. |
+| `providers.example.json` | Provider definitions. **`org-gptoss` and `org-gemma`** are example local/on-prem **executor** providers — replace their placeholder URLs with whatever your org hosts (Ollama, vLLM, llama.cpp, an internal gateway — anything OpenAI-compatible). **`genai-mil`** is an **optional** provider, only for chatting with Gemini *directly* in OpenCode; the planner-mcp does not use it (the MCP server calls genai.mil itself). Merge the blocks you want into `~/.config/opencode/opencode.json` under `provider`. |
+| `opencode.example.json` | MCP registration template — the `mcp` block that wires this repo's `server.py` into OpenCode. `scripts/setup.py` installs this into your **global** config automatically (substituting paths). You only touch it directly for a manual install. |
 | `AGENTS.example.md` | Executor system-prompt addendum. Pushes the executor toward "default-deny on freelancing" so it actually uses the planner-mcp tools instead of producing its own analysis/drafts. Merge into your `AGENTS.md` or equivalent. |
 
 ## Quickstart (assuming you already use OpenCode)
@@ -24,11 +24,14 @@ export GENAI_MIL_API_KEY=your-key-here
 # 2. Verify the genai.mil endpoint works for you
 .venv/bin/python scripts/healthcheck.py
 
-# 3. Wire the MCP into your OpenCode config
-#    (replace __GENAI_MCP_DIR__ in the template, then merge)
+# 3. Register the MCP in your GLOBAL OpenCode config.
+#    Easiest: let the setup script do it (it merges the mcp block for you):
+python3 scripts/setup.py
+#    Manual alternative — substitute the path, then merge the `mcp` block
+#    into ~/.config/opencode/opencode.json yourself:
 sed "s|__GENAI_MCP_DIR__|$HOME/plan_exec_mcp|g" config/opencode.example.json > /tmp/mcp_snippet.json
-#    Then manually merge /tmp/mcp_snippet.json into your ~/.config/opencode/opencode.json
-#    (or use it as a local opencode.json in a working directory).
+#    Register it GLOBALLY, not as a repo-local opencode.json — a repo-local
+#    file only loads when OpenCode runs from the repo directory itself.
 
 # 4. (Optional) Add the executor instructions
 cat config/AGENTS.example.md >> ~/.config/opencode/AGENTS.md
@@ -56,16 +59,21 @@ The provider name (`org-gptoss`, `org-gemma`) is just a label — pick whatever'
 
 This MCP was designed and tested with GPT-OSS 120B and Gemma 4 31B as the executor models because those are what was available, but any model with reasonable tool-calling support should work. Stronger executors will short-circuit the MCP more aggressively (which can be desirable); weaker ones will lean on it more.
 
+**The executor is whatever model you pass to `--model`** (or pick via `/models` in an interactive session). It must be one of these local/on-prem providers — **never** the `genai-mil` Gemini provider. Gemini runs remotely; an executor has to run *on your machine* to read your files and run code. Gemini's role is purely internal to the MCP server, which reaches genai.mil on its own.
+
 ## Quickstart (going from nothing → running OpenCode)
 
 ```sh
 # Install OpenCode
-npm install -g opencode
+npm install -g opencode-ai
 # or follow https://opencode.ai/docs/install
 
 # Set up your global config from the providers template
 mkdir -p ~/.config/opencode
 cp config/providers.example.json ~/.config/opencode/opencode.json
+# (Overwriting like this is fine ONLY on a fresh machine with no existing
+# global config. If you already have one — or once setup.py has added the
+# mcp block — MERGE the provider blocks in instead of overwriting.)
 
 # Set your API key
 export GENAI_MIL_API_KEY=your-key-here

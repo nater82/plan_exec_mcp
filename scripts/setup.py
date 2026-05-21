@@ -8,10 +8,12 @@ Does the following, prompting before each significant step:
 
   1. Creates a Python virtualenv at .venv/
   2. Installs the MCP server's dependencies (mcp, requests)
-  3. Generates a working opencode.json from config/opencode.example.json
-     with the absolute path to this repo substituted in
-  4. Copies config/AGENTS.example.md to AGENTS.md
-  5. Runs scripts/healthcheck.py to verify the genai.mil endpoint works
+  3. Registers the planner-mcp in OpenCode's GLOBAL config
+     (~/.config/opencode/opencode.json) so it loads from any directory
+  4. Optionally adds the example provider blocks to that same global
+     config (only ones you don't already have; never overwrites)
+  5. Copies config/AGENTS.example.md to AGENTS.md
+  6. Runs scripts/healthcheck.py to verify the genai.mil endpoint works
 
 Skip steps you've already done — the script detects existing files and
 asks before overwriting.
@@ -19,6 +21,7 @@ asks before overwriting.
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
@@ -31,7 +34,9 @@ VENV_DIR = REPO_ROOT / ".venv"
 REQUIREMENTS = REPO_ROOT / "requirements.txt"
 
 OPENCODE_TEMPLATE = REPO_ROOT / "config" / "opencode.example.json"
-OPENCODE_LOCAL = REPO_ROOT / "opencode.json"
+PROVIDERS_TEMPLATE = REPO_ROOT / "config" / "providers.example.json"
+GLOBAL_OPENCODE_CONFIG = Path.home() / ".config" / "opencode" / "opencode.json"
+GLOBAL_CONFIG_BACKUP = GLOBAL_OPENCODE_CONFIG.with_name("opencode.json.bak")
 
 AGENTS_TEMPLATE = REPO_ROOT / "config" / "AGENTS.example.md"
 AGENTS_LOCAL = REPO_ROOT / "AGENTS.md"
@@ -80,6 +85,28 @@ def ask_yes_no(prompt: str, default: bool = True) -> bool:
         print("  Please answer y or n.")
 
 
+def _backup_global_config() -> None:
+    """Back up the global OpenCode config once, before setup first modifies it."""
+    if GLOBAL_OPENCODE_CONFIG.exists() and not GLOBAL_CONFIG_BACKUP.exists():
+        GLOBAL_CONFIG_BACKUP.write_text(GLOBAL_OPENCODE_CONFIG.read_text())
+        ok(f"backed up existing config -> {GLOBAL_CONFIG_BACKUP}")
+
+
+def _load_global_config() -> dict | None:
+    """Load the global config as a dict (fresh skeleton if absent).
+
+    Returns None if the file exists but is not valid JSON.
+    """
+    if not GLOBAL_OPENCODE_CONFIG.exists():
+        return {"$schema": "https://opencode.ai/config.json"}
+    try:
+        return json.loads(GLOBAL_OPENCODE_CONFIG.read_text())
+    except json.JSONDecodeError as exc:
+        err(f"existing {GLOBAL_OPENCODE_CONFIG} is not valid JSON: {exc}")
+        print("    Fix or remove that file, then re-run setup.")
+        return None
+
+
 # ---- steps ----------------------------------------------------------------
 
 
@@ -118,26 +145,103 @@ def step_install_deps() -> bool:
     return True
 
 
-def step_opencode_json() -> bool:
-    header("Step 3: Generate local opencode.json")
+def step_register_mcp() -> bool:
+    header("Step 3: Register the planner-mcp in OpenCode's global config")
     if not OPENCODE_TEMPLATE.exists():
         err(f"template not found: {OPENCODE_TEMPLATE}")
         return False
 
-    if OPENCODE_LOCAL.exists():
-        warn(f"opencode.json already exists at {OPENCODE_LOCAL}")
-        if not ask_yes_no("Overwrite with a fresh copy from the template?", default=False):
-            ok("keeping existing opencode.json")
-            return True
+    template = json.loads(OPENCODE_TEMPLATE.read_text().replace(PLACEHOLDER, str(REPO_ROOT)))
+    mcp_blocks = template.get("mcp", {})
+    if not mcp_blocks:
+        err("template config/opencode.example.json has no 'mcp' block")
+        return False
 
-    content = OPENCODE_TEMPLATE.read_text().replace(PLACEHOLDER, str(REPO_ROOT))
-    OPENCODE_LOCAL.write_text(content)
-    ok(f"wrote {OPENCODE_LOCAL}")
+    print(f"  Registering the MCP in your GLOBAL OpenCode config:")
+    print(f"    {GLOBAL_OPENCODE_CONFIG}")
+    print("  This makes the planner-mcp load in every OpenCode session, from any")
+    print("  directory. A repo-local opencode.json would only load when OpenCode")
+    print("  runs from the repo folder itself — a common and confusing footgun.")
+
+    if not ask_yes_no("Register the MCP globally?", default=True):
+        warn("skipped. To register by hand later, merge the 'mcp' block from")
+        print(f"    config/opencode.example.json into {GLOBAL_OPENCODE_CONFIG}")
+        print(f"    (replacing {PLACEHOLDER} with {REPO_ROOT}).")
+        return True
+
+    GLOBAL_OPENCODE_CONFIG.parent.mkdir(parents=True, exist_ok=True)
+    _backup_global_config()
+    existing = _load_global_config()
+    if existing is None:
+        return False
+
+    existing.setdefault("mcp", {})
+    for name, block in mcp_blocks.items():
+        if name in existing["mcp"]:
+            warn(f"'mcp.{name}' already registered — refreshing it with current paths")
+        existing["mcp"][name] = block
+
+    GLOBAL_OPENCODE_CONFIG.write_text(json.dumps(existing, indent=2) + "\n")
+    ok(f"registered [{', '.join(mcp_blocks)}] in {GLOBAL_OPENCODE_CONFIG}")
+    print("  Restart OpenCode if it's running — the MCP block is read at startup.")
+    return True
+
+
+def step_providers() -> bool:
+    header("Step 4: Add executor provider blocks to the global config")
+    if not PROVIDERS_TEMPLATE.exists():
+        err(f"template not found: {PROVIDERS_TEMPLATE}")
+        return False
+
+    provider_blocks = json.loads(PROVIDERS_TEMPLATE.read_text()).get("provider", {})
+    if not provider_blocks:
+        err("config/providers.example.json has no 'provider' block")
+        return False
+
+    print("  OpenCode needs provider blocks for the executor models it runs on")
+    print("  your machine. This step can add the example providers")
+    print(f"  ({', '.join(provider_blocks)}) to your global config.")
+    print("  SAFE MERGE: it only adds providers you don't already have — it never")
+    print("  overwrites an existing provider block, so your real endpoint URLs and")
+    print("  any providers you've already configured are left untouched.")
+    print("  The blocks it adds use PLACEHOLDER URLs you must edit afterward.")
+
+    if not ask_yes_no("Add the example provider blocks now?", default=True):
+        warn("skipped. Add them yourself: merge the 'provider' block from")
+        print(f"    config/providers.example.json into {GLOBAL_OPENCODE_CONFIG}")
+        print("    (keep the existing 'mcp' block and any providers you already have).")
+        return True
+
+    GLOBAL_OPENCODE_CONFIG.parent.mkdir(parents=True, exist_ok=True)
+    _backup_global_config()
+    existing = _load_global_config()
+    if existing is None:
+        return False
+
+    existing.setdefault("provider", {})
+    added, skipped = [], []
+    for name, block in provider_blocks.items():
+        if name in existing["provider"]:
+            skipped.append(name)
+        else:
+            existing["provider"][name] = block
+            added.append(name)
+
+    GLOBAL_OPENCODE_CONFIG.write_text(json.dumps(existing, indent=2) + "\n")
+    if skipped:
+        warn(f"left your existing provider(s) untouched: {', '.join(skipped)}")
+    if added:
+        ok(f"added provider(s): {', '.join(added)}")
+        print("  IMPORTANT: before running OpenCode, edit the placeholder endpoint")
+        print(f"  URLs for the added provider(s) in {GLOBAL_OPENCODE_CONFIG}.")
+        print("  (The genai-mil provider is optional — see config/README.md.)")
+    else:
+        ok("all example providers already present — nothing to add")
     return True
 
 
 def step_agents_md() -> bool:
-    header("Step 4: AGENTS.md (optional executor system prompt)")
+    header("Step 5: AGENTS.md (optional executor system prompt)")
     if not AGENTS_TEMPLATE.exists():
         err(f"template not found: {AGENTS_TEMPLATE}")
         return False
@@ -166,7 +270,7 @@ def step_agents_md() -> bool:
 
 
 def step_healthcheck() -> bool:
-    header("Step 5: Healthcheck against genai.mil")
+    header("Step 6: Healthcheck against genai.mil")
     if not os.environ.get("GENAI_MIL_API_KEY"):
         warn("GENAI_MIL_API_KEY is not set in this shell.")
         print("    Set it now (export GENAI_MIL_API_KEY=...) and re-run this step manually:")
@@ -195,14 +299,18 @@ def print_next_steps() -> None:
     print("  Set your API key if you haven't already:")
     print("    echo 'export GENAI_MIL_API_KEY=your-key' >> ~/.bashrc && source ~/.bashrc")
     print()
-    print("  Wire the providers into OpenCode (one-time, global):")
-    print(f"    cp config/providers.example.json ~/.config/opencode/opencode.json")
-    print("    (or merge into your existing ~/.config/opencode/opencode.json)")
+    print("  Edit your provider endpoint URLs:")
+    print("    If setup added the provider blocks (step 4), open the global config")
+    print(f"    {GLOBAL_OPENCODE_CONFIG}")
+    print("    and replace the placeholder URLs for org-gptoss / org-gemma with")
+    print("    your real executor endpoints. See config/README.md for details.")
     print()
     print("  Run the MCP smoke test (~2-3 min):")
     print("    .venv/bin/python tests/test_server_logic.py")
     print()
-    print("  Try a real end-to-end run via OpenCode:")
+    print("  Try a real end-to-end run via OpenCode. The --model you pass is the")
+    print("  EXECUTOR — it must be a local/on-prem model, never a genai-mil/gemini")
+    print("  model (Gemini runs remotely and cannot touch your local files):")
     print("    opencode run --model org-gptoss/openai/gpt-oss-120b \\")
     print("      \"Process the incident report at tests/test_report.txt \\")
     print("       and produce a safety-officer notification.\"")
@@ -215,13 +323,18 @@ def print_next_steps() -> None:
 
 
 def main() -> int:
+    # Line-buffer stdout so our prints stay correctly ordered with subprocess
+    # output even when output is piped or redirected (not a TTY).
+    sys.stdout.reconfigure(line_buffering=True)
+
     print(f"{BOLD}plan_exec_mcp setup{RESET}")
     print(f"repo root: {REPO_ROOT}")
 
     steps = [
         ("venv", step_venv),
         ("deps", step_install_deps),
-        ("opencode.json", step_opencode_json),
+        ("register-mcp", step_register_mcp),
+        ("providers", step_providers),
         ("AGENTS.md", step_agents_md),
         ("healthcheck", step_healthcheck),
     ]

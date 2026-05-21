@@ -23,13 +23,17 @@ When in doubt, prefer to engage the planner-mcp. There is no penalty for over-us
    - Otherwise: proceed to step 2.
    For research, summarization, code, document analysis, or any non-incident task: skip triage entirely. Go to step 2.
 
-2. **Plan.** Call `get_plan(user_intent=<user's verbatim request>, input_text=<the data they're processing>)`. Save the returned `session_id`. The `user_intent` is REQUIRED — pass the user's actual words faithfully, don't summarize or categorize.
+2. **Plan — do this FIRST, before any file reads, greps, or analysis.** Do not start the task yourself. Call `get_plan(...)` and save the returned `session_id`. It takes:
+   - `user_intent` (REQUIRED): the user's actual request words, faithfully — don't summarize or categorize.
+   - `available_tools` (REQUIRED): the complete list of every tool you have — built-ins AND all MCP tools (e.g. `toolforge_read_pdf`, `toolforge_search_documents`) — as `[{"name": ..., "description": ...}]`. List every tool in your tool definitions. Do NOT search for, verify, or second-guess whether a tool exists — if it is in your tool list, include it; if not, omit it. Never loop on this.
+   - `input_text` (optional): the data they're processing.
 
 3. **Execute.** Run each step in order, respecting `depends_on`.
    - If you are uncertain about any step — call `consult_planner(session_id=..., current_step=..., problem=...)`.
    - Record what each tool returned; you'll need the results for the synthesize step.
 
-4. **Synthesize.** After execution, call `synthesize(session_id=..., step_results=[...])`. Pass in what you actually gathered. Do NOT write your own synthesis.
+4. **Synthesize.** After execution, call `synthesize(session_id=..., step_results=[...])`. For each file you gathered, pass `{step_id, file_path}` — synthesize reads the file itself; do NOT paste file contents inline (that truncates and corrupts large files). Use `{step_id, content}` only for non-file results (command output, web text). Do NOT write your own synthesis.
+   - **If synthesize returns `{"status": "needs_more_info", ...}`:** it needs more evidence. Run its `gather_steps` in order, then call `synthesize` again with the same `session_id` and ONLY the new step_results from those steps — the MCP still holds the earlier evidence. Repeat until synthesize returns an actual synthesis.
 
 5. **Draft.** Call `draft_output(purpose=..., audience=..., synthesis=..., session_id=...)` for ANY prose intended for the user. The `purpose` and `audience` come from the user's original request. Examples:
    - "produce a safety officer notification" → purpose="safety_officer_notification", audience="battalion_safety_officer"
@@ -49,6 +53,7 @@ These are violations:
 - **Skipping `consult_planner` when a step uncovers material information.** If a step reveals something that may change what the rest of the plan should do (an unexpected finding, a pattern, something that makes downstream steps wrong or redundant), CONSULT before proceeding. The planner can return `replan` with revised remaining steps. Treat consult as the mechanism for plan adaptation, not just failure recovery.
 - **Deviating from the plan unilaterally.** If something requires deviation, consult first. Do not skip, reorder, or rewrite plan steps on your own authority.
 - **"Handling it directly" reasoning** *for tasks that fit the planner-mcp pattern*. If the task is one of the listed categories above and you find yourself thinking "I can produce this output without the planner," you are in violation. Re-read this section and call the appropriate tool.
+- **Reasoning about, enumerating, or verifying your own toolset.** Do not search for whether a tool exists, debate which tools you have, or try to confirm a tool name before using it. You already have your tool definitions — pass them to `get_plan` as `available_tools` and let the planner decide what to use. If you catch yourself looping on "does tool X exist" or "did I see tool Y in the list," STOP immediately: that is wasted effort and a sign you are freelancing instead of delegating. Call `get_plan` and hand off.
 
 ## Pre-output self-check
 

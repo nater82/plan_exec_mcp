@@ -38,8 +38,17 @@ def main() -> int:
         print(f"  {k}: {triage.get(k)!r}")
 
     section("2. get_plan happy path → session_id")
+    # available_tools is REQUIRED — a realistic mix of built-ins and an MCP tool.
+    available_tools = [
+        {"name": "Read", "description": "Read a file. Args: file_path (str, absolute)."},
+        {"name": "Glob", "description": "Find files by glob pattern. Args: pattern (str)."},
+        {"name": "Grep", "description": "Search file contents with regex. Args: pattern (str), path (str)."},
+        {"name": "Bash", "description": "Run a shell command. Args: command (str)."},
+        {"name": "toolforge_read_pdf", "description": "Extract text from a PDF file. Args: file_path (str)."},
+    ]
     plan = server.get_plan(
         user_intent="produce a CCIR for battalion CDR covering this incident",
+        available_tools=available_tools,
         input_text=HEAT_CASUALTY,
     )
     if "error" in plan:
@@ -66,6 +75,9 @@ def main() -> int:
     print(f"  reasoning (first 150 chars): {consult['reasoning'][:150]}")
 
     section("4. synthesize via session_id with mock step_results")
+    # Step 2 uses file_path — exercises the MCP's server-side file read
+    # (the executor passes a path; the MCP reads the file itself).
+    sop_ref = _HERE / "references" / "SOP-7-2-3_weather_triggers.md"
     mock_step_results = [
         {
             "id": 1,
@@ -75,9 +87,9 @@ def main() -> int:
         },
         {
             "id": 2,
-            "intent": "Pull battalion heat SOP",
+            "intent": "Pull battalion heat/weather SOP (read server-side from file_path)",
             "tool": "Read",
-            "result": "SOP requires LANE SUSPENSION when WBGT crosses BLACK FLAG (88F). Re-check WBGT every 15 minutes during YELLOW or higher. Trainees must consume 1 quart per hour minimum.",
+            "file_path": str(sop_ref),
         },
         {
             "id": 3,
@@ -86,9 +98,20 @@ def main() -> int:
             "result": "Range control log: WBGT 84 at 1200, 86 at 1230, 88 at 1245, 90 at 1330, 91 at 1345. Lane suspended at 1400.",
         },
     ]
+    print(f"  step 2 file_path: {sop_ref}  (exists: {sop_ref.exists()})")
     synth = server.synthesize(step_results=mock_step_results, session_id=sid)
+    # synthesize may request more info; run the round-trip until it synthesizes.
+    _round = 1
+    while isinstance(synth, dict) and synth.get("status") == "needs_more_info" and _round < 5:
+        print(f"  round {_round}: needs_more_info — {synth.get('reason', '')[:80]}")
+        print(f"    gather_steps: {len(synth.get('gather_steps', []))}")
+        synth = server.synthesize(step_results=[], session_id=sid)
+        _round += 1
     if "error" in synth:
         print(f"FAILED: {synth}")
+        return 1
+    if synth.get("status") == "needs_more_info":
+        print("FAILED: synthesize still requesting info after the final round")
         return 1
     print(f"  key_findings ({len(synth['key_findings'])}):")
     for f in synth["key_findings"]:

@@ -10,12 +10,15 @@ Tools (in order of typical use):
       Skip for research/summarization/code/general tasks. Defaults to Gemini
       Flash for speed/cost.
 
-  - get_plan(user_intent, input_text="", available_tools=None)
+  - get_plan(user_intent, available_tools, input_text="")
       Returns a structured multi-step JSON plan + a session_id. The plan
       always ends with synthesize + draft_output as final steps. Save the
-      session_id and pass it to subsequent tools. `user_intent` is the
-      user's verbatim request (required); `input_text` may be empty for
-      open-ended tasks.
+      session_id and pass it to subsequent tools. `user_intent` (verbatim
+      request) and `available_tools` (every tool the executor can call,
+      built-ins AND MCP tools) are both REQUIRED; the planner only plans
+      with tools it is told about. `input_text` may be empty for
+      open-ended tasks. available_tools is cached in the session and reused
+      by consult_planner.
 
   - consult_planner(current_step, problem, session_id=None,
                     user_intent=None, input_text=None)
@@ -87,6 +90,15 @@ DESCRIPTION_STYLE = os.environ.get("PLANNER_TOOL_STYLE", "heavy")
 HTTP_TIMEOUT = float(os.environ.get("PLANNER_HTTP_TIMEOUT", "180"))
 RETRY_ON_VALIDATION_FAILURE = True
 
+# When enabled (default), synthesize may return a `needs_more_info` request
+# that the executor fulfills with extra gather steps, then re-calls synthesize.
+# Disable it (PLANNER_ALLOW_INFO_REQUESTS=0) to force synthesize to always
+# produce a synthesis in a single pass — useful for one-shot / headless runs
+# where the extra round-trip is undesirable.
+_INFO_REQUESTS_ENABLED = os.environ.get(
+    "PLANNER_ALLOW_INFO_REQUESTS", "1"
+).strip().lower() not in ("0", "false", "no", "off")
+
 # Single default; per-tool overrides via PLANNER_MODEL_<TOOL_NAME_UPPER>
 DEFAULT_MODEL = os.environ.get("PLANNER_MODEL", "gemini-3.1-pro-preview")
 
@@ -110,25 +122,39 @@ MODELS = {
 ALLOWED_SEVERITY = {"routine", "elevated", "urgent"}
 ALLOWED_DECISIONS = {"proceed", "revise", "replan", "skip", "escalate"}
 
+# synthesize may request more information across up to this many rounds total;
+# the final round is forced to produce a synthesis (guards against loops).
+MAX_SYNTHESIZE_ROUNDS = 3
+
 # ---- Tool descriptions ----------------------------------------------------
 
 GET_PLAN_DESC = {
     "heavy": (
-        "REQUIRED whenever you receive an incident report that needs full processing. "
+        "REQUIRED whenever you receive a task that needs full processing. "
         "Returns the authoritative multi-step plan AND a session_id you must save "
         "for subsequent calls. The plan ALWAYS ends with two steps that call back "
         "into this MCP (synthesize, then draft_output) — execute those just like any "
         "other plan step. You are NOT authorized to investigate, analyze, or draft "
         "independently; the planner determines what to do. Call this FIRST. "
-        "PASS `user_intent` containing the user's actual request words (e.g. "
-        "'produce a safety officer notification', 'draft a CCIR') so the planner can "
-        "tailor the final draft_output step's purpose and audience. Do not skip or "
-        "substitute steps without consulting again."
+        "YOU MUST PASS TWO THINGS. (1) `user_intent`: the user's actual request "
+        "words, verbatim (e.g. 'produce a safety officer notification', 'draft a "
+        "CCIR') — do not paraphrase. (2) `available_tools`: the COMPLETE list of "
+        "every tool you have access to — built-ins AND every MCP tool (file "
+        "readers such as toolforge_read_pdf, search tools, etc.) — as "
+        "[{\"name\": str, \"description\": str}, ...] where each description "
+        "states what the tool does and its argument names and types. The planner "
+        "builds steps ONLY from tools you list here: omit a tool (e.g. a PDF "
+        "reader) and the plan can never use it. If the task centres on specific "
+        "local files, pass their paths as `input_files` (a list) instead of "
+        "pasting file contents into `input_text` — the MCP reads them. Do not "
+        "skip or substitute steps without consulting again."
     ),
     "light": (
         "Generate a structured plan. Returns JSON with summary, steps (always ending "
-        "with synthesize and draft_output), and a session_id for use with related tools. "
-        "Pass user_intent to tailor the draft."
+        "with synthesize and draft_output), and a session_id for use with related "
+        "tools. Pass `user_intent` (the user's request, verbatim) and "
+        "`available_tools` (every tool you can call — built-ins and MCP tools — as "
+        "[{name, description}]); the planner only plans with tools you list."
     ),
 }
 
@@ -157,12 +183,23 @@ SYNTHESIZE_DESC = {
         "Takes the gathered evidence and produces a structured analytical synthesis — "
         "key findings, evidence summary, gaps. You are NOT authorized to write your "
         "own analysis; this tool does it. Call once per plan execution after all steps "
-        "are complete (or after you have decided to stop executing). The output feeds "
+        "are complete (or after you have decided to stop executing). "
+        "IMPORTANT — for any step result that is the contents of a FILE, pass "
+        "{\"step_id\": N, \"file_path\": \"<absolute path>\"} and this tool reads the "
+        "file itself. Do NOT paste large file contents inline — that truncates and "
+        "corrupts. Use inline {\"step_id\": N, \"content\": \"...\"} only for non-file "
+        "results (command output, web text, computed values). "
+        "This tool may return EITHER a synthesis OR {\"status\": \"needs_more_info\", "
+        "\"gather_steps\": [...], \"reason\": ...}. If it returns needs_more_info: run "
+        "the gather_steps in order, then call synthesize AGAIN with the same "
+        "session_id and ONLY the new step_results from those steps — the MCP retains "
+        "the earlier evidence. Repeat until it returns a synthesis. The output feeds "
         "draft_output."
     ),
     "light": (
-        "Produce a structured analytical synthesis after plan execution. Useful before "
-        "drafting any human-facing output."
+        "Produce a structured analytical synthesis after plan execution. For file-based "
+        "step results pass {step_id, file_path} — the tool reads the file itself. "
+        "Useful before drafting any human-facing output."
     ),
 }
 
@@ -206,20 +243,31 @@ if DESCRIPTION_STYLE not in GET_PLAN_DESC:
 print(f"[planner-mcp] starting (tool-style={DESCRIPTION_STYLE})", file=sys.stderr)
 for _tool, _model in MODELS.items():
     print(f"[planner-mcp]   {_tool}: {_model}", file=sys.stderr)
+print(
+    f"[planner-mcp]   synthesize info-requests: "
+    f"{'enabled' if _INFO_REQUESTS_ENABLED else 'disabled'}",
+    file=sys.stderr,
+)
 
 # ---- Session memory -------------------------------------------------------
-# In-memory only — sessions die with the server process. For OpenCode stdio
-# transport that's per-conversation, which is fine for the prototype.
-# TODO: optional persistence (sqlite or JSON-per-session) for cross-process use.
+# In-memory only — sessions die with the server process (per OpenCode run, or
+# per interactive conversation). Sessions are deliberately small: they hold
+# file PATHS, not file contents (see _resolve_step_result_files and
+# _effective_input_text). So there is NO time-based expiry — context is never
+# dropped out from under an in-progress task. A count cap is the only bound,
+# guarding against unbounded growth in a very long-lived session.
 
 _SESSIONS: dict[str, dict] = {}
-_SESSION_TTL_SECONDS = 3600  # 1h; prune entries older than this on access
+_MAX_SESSIONS = 200  # keep the newest this many; drop the oldest beyond it
 
 
-def _prune_expired_sessions() -> None:
-    cutoff = time.time() - _SESSION_TTL_SECONDS
-    expired = [sid for sid, sess in _SESSIONS.items() if sess["created_at"] < cutoff]
-    for sid in expired:
+def _prune_sessions() -> None:
+    """Drop the oldest sessions if we are holding more than the cap."""
+    excess = len(_SESSIONS) - _MAX_SESSIONS
+    if excess <= 0:
+        return
+    oldest = sorted(_SESSIONS, key=lambda sid: _SESSIONS[sid]["created_at"])[:excess]
+    for sid in oldest:
         del _SESSIONS[sid]
 
 
@@ -228,15 +276,18 @@ def _new_session(
     input_text: str,
     plan: dict,
     available_tools: list[dict] | None,
+    input_files: list[str] | None = None,
 ) -> str:
-    _prune_expired_sessions()
+    _prune_sessions()
     sid = secrets.token_hex(6)  # 12 hex chars; collision risk negligible at our scale
     _SESSIONS[sid] = {
         "user_intent": user_intent,
-        "input_text": input_text,
+        "input_text": input_text,            # raw — file contents are NOT expanded into storage
+        "input_files": input_files or [],    # paths only; contents read on demand
         "plan": plan,
         "available_tools": available_tools,
-        "step_results": [],  # caller can append via record_step_result if useful later
+        "step_results": [],          # accumulates across synthesize rounds
+        "synthesize_rounds": 0,      # how many times synthesize has run this session
         "created_at": time.time(),
     }
     return sid
@@ -372,21 +423,53 @@ def _validate_consult(reply: dict, allowed_tools: set[str]) -> list[str]:
     return errors
 
 
-def _validate_synthesis(synth: dict, _allowed_tools: set[str]) -> list[str]:
+def _validate_synthesis(parsed: dict, allowed_tools: set[str], final_round: bool = False) -> list[str]:
     errors: list[str] = []
-    if not isinstance(synth, dict):
-        return ["synthesis must be a JSON object"]
+    if not isinstance(parsed, dict):
+        return ["response must be a JSON object"]
 
-    findings = synth.get("key_findings")
+    # Mode 2: a request for more information. Not permitted on the final round.
+    if parsed.get("status") == "needs_more_info":
+        if final_round:
+            return [
+                "this is the final synthesis round — output a synthesis, "
+                "not a needs_more_info request"
+            ]
+        if not isinstance(parsed.get("reason"), str) or not parsed["reason"].strip():
+            errors.append("needs_more_info.reason must be a non-empty string")
+        steps = parsed.get("gather_steps")
+        if not isinstance(steps, list) or not steps:
+            errors.append("needs_more_info.gather_steps must be a non-empty array")
+        else:
+            for i, step in enumerate(steps):
+                if not isinstance(step, dict):
+                    errors.append(f"gather_steps[{i}] must be an object")
+                    continue
+                tool = step.get("tool")
+                if tool in (SYNTHESIZE_TOOL_NAME, DRAFT_OUTPUT_TOOL_NAME):
+                    errors.append(
+                        f"gather_steps[{i}].tool must not be synthesize or draft_output "
+                        "— gather steps are discovery only"
+                    )
+                elif tool not in allowed_tools:
+                    errors.append(
+                        f"gather_steps[{i}].tool={tool!r} must be one of {sorted(allowed_tools)}"
+                    )
+                if not isinstance(step.get("args"), dict):
+                    errors.append(f"gather_steps[{i}].args must be an object")
+        return errors
+
+    # Mode 1: a synthesis.
+    findings = parsed.get("key_findings")
     if not isinstance(findings, list) or not findings:
         errors.append("key_findings must be a non-empty array")
     elif not all(isinstance(f, str) and f.strip() for f in findings):
         errors.append("all key_findings entries must be non-empty strings")
 
-    if not isinstance(synth.get("evidence_summary"), str) or len(synth["evidence_summary"].strip()) < 100:
+    if not isinstance(parsed.get("evidence_summary"), str) or len(parsed["evidence_summary"].strip()) < 100:
         errors.append("evidence_summary must be a substantive string (>=100 chars)")
 
-    gaps = synth.get("gaps_or_uncertainties")
+    gaps = parsed.get("gaps_or_uncertainties")
     if not isinstance(gaps, list):
         errors.append("gaps_or_uncertainties must be an array (may be empty)")
 
@@ -452,6 +535,137 @@ def _resolve_allowed_tools(available_tools: list[dict] | None) -> set[str]:
     names.add(SYNTHESIZE_TOOL_NAME)
     names.add(DRAFT_OUTPUT_TOOL_NAME)
     return names
+
+
+# Per-file read cap for server-side step-result resolution. Generous (Gemini's
+# context is large) but bounds a pathological huge file.
+_STEP_FILE_CHAR_CAP = 200_000
+
+
+# Office/PDF formats store text compressed inside the container, so a plain
+# byte read yields garbage — they must be parsed. The parsing libraries are
+# optional: if one is missing, the reader returns a clear marker rather than
+# crashing the MCP. Maps extension -> pip package name.
+_DOC_PARSER_LIB = {
+    ".pdf": "pypdf",
+    ".docx": "python-docx",
+    ".xlsx": "openpyxl",
+    ".pptx": "python-pptx",
+}
+
+
+def _extract_document_text(path: str, ext: str) -> str:
+    """Parse a binary office/PDF document into plain text.
+
+    Raises ImportError if the format's parsing library is not installed.
+    """
+    if ext == ".pdf":
+        from pypdf import PdfReader
+        reader = PdfReader(path)
+        return "\n\n".join((page.extract_text() or "") for page in reader.pages)
+    if ext == ".docx":
+        import docx
+        doc = docx.Document(path)
+        parts = [p.text for p in doc.paragraphs]
+        for table in doc.tables:
+            for row in table.rows:
+                parts.append(" | ".join(cell.text for cell in row.cells))
+        return "\n".join(parts)
+    if ext == ".xlsx":
+        import openpyxl
+        wb = openpyxl.load_workbook(path, data_only=True, read_only=True)
+        parts = []
+        for ws in wb.worksheets:
+            parts.append(f"# Sheet: {ws.title}")
+            for row in ws.iter_rows(values_only=True):
+                cells = [str(c) for c in row if c is not None]
+                if cells:
+                    parts.append(" | ".join(cells))
+        return "\n".join(parts)
+    if ext == ".pptx":
+        import pptx
+        pres = pptx.Presentation(path)
+        parts = []
+        for i, slide in enumerate(pres.slides, 1):
+            parts.append(f"# Slide {i}")
+            for shape in slide.shapes:
+                if shape.has_text_frame:
+                    for para in shape.text_frame.paragraphs:
+                        line = "".join(run.text for run in para.runs)
+                        if line.strip():
+                            parts.append(line)
+        return "\n".join(parts)
+    raise ValueError(f"no document extractor for {ext}")
+
+
+def _read_file_capped(path: str) -> str:
+    """Read a file server-side, size-capped, with a clear marker on failure.
+
+    Office/PDF documents are parsed into text (the executor can pass a path
+    to a .pdf/.docx/.xlsx/.pptx and the MCP extracts the readable content);
+    everything else is read as UTF-8 text.
+    """
+    expanded = os.path.expanduser(path)
+    ext = os.path.splitext(expanded)[1].lower()
+    try:
+        if ext in _DOC_PARSER_LIB:
+            try:
+                text = _extract_document_text(expanded, ext)
+            except ImportError:
+                lib = _DOC_PARSER_LIB[ext]
+                print(f"[planner-mcp] cannot parse {ext} — '{lib}' not installed", file=sys.stderr)
+                return (
+                    f"[FILE NOT PARSED: {path} is a {ext} document; the MCP server "
+                    f"needs the '{lib}' package to read it — pip install {lib}]"
+                )
+        else:
+            with open(expanded, "r", encoding="utf-8", errors="replace") as fh:
+                text = fh.read()
+    except OSError as exc:
+        print(f"[planner-mcp] could not read {path}: {exc}", file=sys.stderr)
+        return f"[FILE NOT READ by MCP server: {path} — {exc}]"
+    except Exception as exc:  # noqa: BLE001 — a malformed document must not crash the MCP
+        print(f"[planner-mcp] could not parse {path}: {exc}", file=sys.stderr)
+        return f"[FILE NOT PARSED by MCP server: {path} — {exc}]"
+
+    if len(text) > _STEP_FILE_CHAR_CAP:
+        text = text[:_STEP_FILE_CHAR_CAP] + "\n[...truncated by MCP server file-read cap...]"
+    return text
+
+
+def _resolve_step_result_files(step_results: list) -> list:
+    """Read step_results entries that carry a `file_path`, server-side.
+
+    The executor (a weak local model) is unreliable at ferrying large file
+    contents into a tool call — it truncates and corrupts. When a step result
+    carries a `file_path`, the MCP reads the file itself (it runs locally on
+    the same machine) and substitutes the real, full content. A file that
+    cannot be read becomes an explicit marker so synthesis flags it as a gap
+    rather than crashing.
+    """
+    resolved = []
+    for entry in step_results:
+        if not isinstance(entry, dict) or not isinstance(entry.get("file_path"), str):
+            resolved.append(entry)
+            continue
+        new_entry = dict(entry)
+        new_entry["content"] = _read_file_capped(entry["file_path"])
+        resolved.append(new_entry)
+    return resolved
+
+
+def _effective_input_text(input_text: str | None, input_files: list | None) -> str:
+    """Combine raw input_text with the server-side-read contents of input_files.
+
+    Sessions store input_files as PATHS only; their contents are expanded here
+    at use time, so stored sessions stay small regardless of source-file size.
+    """
+    base = (input_text or "").strip()
+    if not input_files:
+        return base
+    blocks = [f"--- FILE: {p} ---\n{_read_file_capped(str(p))}" for p in input_files]
+    files_text = "\n\n".join(blocks)
+    return f"{base}\n\n{files_text}" if base else files_text
 
 
 def _call_with_validation(
@@ -563,8 +777,9 @@ def triage_only(input_text: str) -> dict:
 @mcp.tool(description=GET_PLAN_DESC[DESCRIPTION_STYLE])
 def get_plan(
     user_intent: str,
+    available_tools: list[dict],
     input_text: str = "",
-    available_tools: list[dict] | None = None,
+    input_files: list[str] | None = None,
 ) -> dict:
     """Generate an authoritative multi-step plan and open a session.
 
@@ -582,12 +797,20 @@ def get_plan(
               "explain what this code does"
             Pass the user's words faithfully — do NOT summarize, paraphrase,
             or try to derive a "category" from them.
+        available_tools: REQUIRED. The full list of tools you (the executor)
+            have access to — every built-in AND every MCP tool. Each entry is
+            {"name": "<exact tool name>", "description": "<what it does, plus
+            its argument names and types>"}. The planner builds steps ONLY
+            from tools listed here; omitting a tool (e.g. a PDF reader) means
+            the plan can never use it. Cached in the session and reused by
+            consult_planner.
         input_text: Optional — the data the user is asking you to process
             (a report, document, prompt, code excerpt, etc.). May be empty if
             the task is open-ended and the user_intent is the entire context.
-        available_tools: Optional list of tool descriptors the executor has
-            access to. Each entry is {"name": "ToolName", "description": "..."}.
-            If omitted, uses standard OpenCode built-ins.
+        input_files: Optional list of file PATHS. The MCP reads each file
+            server-side and folds its contents into the planner's context.
+            Prefer this over pasting large file contents into input_text —
+            the session stores only the paths, so it stays small.
 
     Returns:
         The plan JSON with an additional `session_id` field. Save the
@@ -597,8 +820,36 @@ def get_plan(
     if not user_intent or not user_intent.strip():
         return {"error": "user_intent is required and must be a non-empty string", "stage": "input"}
 
+    if not isinstance(available_tools, list) or not available_tools:
+        return {
+            "error": (
+                "available_tools is required: pass the full list of tools you "
+                "have access to — built-ins AND every MCP tool — as a non-empty "
+                'list of {"name": str, "description": str} objects.'
+            ),
+            "stage": "input",
+        }
+    malformed = [
+        t for t in available_tools
+        if not isinstance(t, dict) or not isinstance(t.get("name"), str) or not t["name"].strip()
+    ]
+    if malformed:
+        return {
+            "error": (
+                f"{len(malformed)} available_tools entr"
+                f"{'y is' if len(malformed) == 1 else 'ies are'} malformed: each "
+                'entry must be an object with a non-empty string "name" (and '
+                'ideally a "description" covering the tool\'s arguments).'
+            ),
+            "stage": "input",
+        }
+
+    if input_files is not None and not isinstance(input_files, list):
+        return {"error": "input_files, when provided, must be a list of file paths", "stage": "input"}
+
     allowed_tools = _resolve_allowed_tools(available_tools)
-    messages = build_messages(user_intent, input_text, available_tools)
+    effective_input = _effective_input_text(input_text, input_files)
+    messages = build_messages(user_intent, effective_input, available_tools)
     result = _call_with_validation(
         messages,
         _extract_json,
@@ -609,7 +860,9 @@ def get_plan(
     )
 
     if "error" not in result:
-        sid = _new_session(user_intent, input_text, result, available_tools)
+        # Store raw input_text + input_files (paths) — not the expanded text —
+        # so the session stays small. Consumers re-expand via _effective_input_text.
+        sid = _new_session(user_intent, input_text, result, available_tools, input_files)
         result["session_id"] = sid
 
     return result
@@ -651,7 +904,8 @@ def consult_planner(
     session = _get_session(session_id)
     if session:
         user_intent = user_intent or session["user_intent"]
-        input_text = input_text if input_text is not None else session["input_text"]
+        if input_text is None:
+            input_text = _effective_input_text(session["input_text"], session.get("input_files"))
         available_tools = available_tools or session["available_tools"]
     elif not user_intent or input_text is None:
         return {"error": "must provide either session_id or both user_intent and input_text", "stage": "input"}
@@ -679,9 +933,12 @@ def synthesize(
     """Produce a structured analytical synthesis after plan execution.
 
     Args:
-        step_results: List of executed-step results. Each entry should describe
-            what the step produced (e.g. {"id": 1, "intent": "...", "tool": "Read",
-            "result": "<file contents or summary>"}).
+        step_results: List of executed-step results. For a result that is the
+            contents of a file, pass {"step_id": N, "intent": "...",
+            "file_path": "<absolute path>"} — the MCP reads the file itself,
+            avoiding the executor truncating or corrupting large content. For
+            non-file results (command output, web text, computed values) pass
+            inline {"step_id": N, "content": "..."}.
         session_id: Optional session_id from get_plan; if provided, user_intent,
             input_text, and plan are pulled from session memory.
         user_intent: Required if session_id is not provided.
@@ -689,30 +946,65 @@ def synthesize(
         plan: Required if session_id is not provided.
 
     Returns:
-        JSON with key_findings, evidence_summary, and gaps_or_uncertainties.
-        Severity, when material, is expressed in prose; structured severity
-        classifications come from the separate triage_only tool.
+        Either a synthesis (key_findings, evidence_summary,
+        gaps_or_uncertainties) OR a {"status": "needs_more_info",
+        "gather_steps": [...], "reason": ...} request — in which case run the
+        gather_steps and call synthesize again with the new step_results. The
+        session accumulates step_results across rounds; the final round is
+        forced to produce a synthesis.
     """
     session = _get_session(session_id)
     if session:
         user_intent = user_intent or session["user_intent"]
-        input_text = input_text if input_text is not None else session["input_text"]
+        if input_text is None:
+            input_text = _effective_input_text(session["input_text"], session.get("input_files"))
         plan = plan or session["plan"]
+        available_tools = session.get("available_tools")
     elif not user_intent or input_text is None or plan is None:
         return {"error": "must provide either session_id or all of user_intent, input_text, and plan", "stage": "input"}
+    else:
+        available_tools = None
 
     if not isinstance(step_results, list):
         return {"error": "step_results must be a list", "stage": "input"}
 
-    messages = build_synthesize_messages(user_intent, input_text, plan, step_results)
-    return _call_with_validation(
+    # Accumulate evidence across rounds. The executor passes only the NEW
+    # step_results each round; the session retains everything gathered so far,
+    # so synthesize always sees the full picture. needs_more_info requests
+    # require a session — without one, force a single final round.
+    if session is not None:
+        accumulated = session.setdefault("step_results", [])
+        accumulated.extend(step_results)
+        all_results = accumulated
+        session["synthesize_rounds"] = session.get("synthesize_rounds", 0) + 1
+        round_num = session["synthesize_rounds"]
+    else:
+        all_results = step_results
+        round_num = MAX_SYNTHESIZE_ROUNDS  # no session: force a final synthesis
+
+    # The last round forces a synthesis; so does disabling info-requests entirely.
+    final_round = round_num >= MAX_SYNTHESIZE_ROUNDS or not _INFO_REQUESTS_ENABLED
+
+    # Read any file_path-bearing entries server-side — the executor is
+    # unreliable at ferrying large file contents (it truncates and corrupts).
+    resolved = _resolve_step_result_files(all_results)
+    allowed_tools = _resolve_allowed_tools(available_tools)
+
+    messages = build_synthesize_messages(
+        user_intent, input_text, plan, resolved,
+        round_num=round_num, max_rounds=MAX_SYNTHESIZE_ROUNDS,
+    )
+    result = _call_with_validation(
         messages,
         _extract_json,
-        _validate_synthesis,
+        lambda parsed, tools: _validate_synthesis(parsed, tools, final_round=final_round),
         kind="synthesis",
-        allowed_tools=set(),
+        allowed_tools=allowed_tools,
         model=MODELS["synthesize"],
     )
+    if isinstance(result, dict) and result.get("status") == "needs_more_info":
+        result["session_id"] = session_id
+    return result
 
 
 @mcp.tool(description=DRAFT_DESC[DESCRIPTION_STYLE])

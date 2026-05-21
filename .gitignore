@@ -1,0 +1,34 @@
+# Python
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# OpenCode run logs — contain ANSI escape codes; regenerable from tests
+run_*.log
+
+# Local OpenCode artifacts (in case any land here)
+*.db
+*.db-shm
+*.db-wal
+
+# Editor / OS noise
+.DS_Store
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Local env files (NEVER commit secrets)
+.env
+.env.local
+
+# User-specific generated files — created from config/*.example.* templates
+# Each user substitutes their own paths; don't commit these
+/opencode.json
+/AGENTS.md

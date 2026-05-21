@@ -33,6 +33,13 @@ CRITICAL — TOOL NAMES: every step's `tool` field MUST EXACTLY match one of the
 CRITICAL — ARGUMENT SHAPES: each tool has specific argument names shown in its description. Use those exact argument names. For example, if a tool's description says it takes `file_path`, do not pass `path` instead.
 
 DO NOT include a `severity` field in plan output. Severity/priority assessments belong in the synthesize and draft prose where they belong contextually (e.g. "this medevac with full recovery warrants safety officer review"); a structured enum is more noise than signal for general-purpose tasks. The separate `triage_only` tool produces severity classifications for incident-shaped reports when programmatic severity is genuinely useful.
+
+SYNTHESIZE READS FILES ITSELF — the synthesize step does not need file contents pasted into it. Plan Glob/Grep steps to LOCATE files, then have the synthesize step receive the file PATHS: the executor passes `{step_id, file_path}` entries and synthesize reads them server-side (full, untruncated). You do NOT need a separate Read step purely to feed synthesize — a Glob that locates the file is enough. Still plan explicit Read steps when the EXECUTOR itself must act on a file's contents (e.g. to Edit it).
+
+MODIFYING EXISTING FILES — when the task is to revise, update, or correct an existing file:
+- For a small, localized change (fill a blank, fix a value, change a line or two), plan an `Edit` step with a precise old_string -> new_string. Edit is surgical: a bad match changes nothing rather than destroying the file.
+- For a substantial rewrite, do NOT overwrite the original. Plan a `Write` to a NEW sibling path — e.g. `<name>.revised.<ext>` — so the user's file is preserved and they can review the diff and replace it themselves.
+- Never plan a `Write` that overwrites a user-provided file. A flaky executor that errors mid-task must not be able to clobber the user's original.
 """
 
 import os as _os
@@ -191,7 +198,7 @@ YOUR OUTPUT (clean JSON, no preamble, no fences):
       "id": 6,
       "intent": "Synthesize all gathered evidence (note any missing references as gaps)",
       "tool": "{SYNTHESIZE_TOOL_NAME}",
-      "args": {{"step_results": "<aggregate results from steps 1-5 as a list of objects, including any 'not found' results>", "session_id": "<from get_plan response>"}},
+      "args": {{"step_results": "<for each file located in steps 1-5, pass {{step_id, file_path}} — synthesize reads the file itself; pass {{step_id, content}} for non-file results>", "session_id": "<from get_plan response>"}},
       "depends_on": [1, 2, 3, 4, 5]
     }},
     {{
@@ -267,7 +274,7 @@ YOUR OUTPUT (clean JSON, no preamble, no fences):
       "id": 7,
       "intent": "Synthesize Phase II timing constraints from the gathered docs and the original v2 draft",
       "tool": "{SYNTHESIZE_TOOL_NAME}",
-      "args": {{"step_results": "<aggregate steps 1-6 with each doc's content or 'not found' status>", "session_id": "<from get_plan response>"}},
+      "args": {{"step_results": "<{{step_id, file_path}} for each doc located in steps 1-6 — synthesize reads them; {{step_id, content}} for non-file results>", "session_id": "<from get_plan response>"}},
       "depends_on": [1, 2, 3, 4, 5, 6]
     }},
     {{
@@ -283,6 +290,7 @@ YOUR OUTPUT (clean JSON, no preamble, no fences):
 Notes on these examples:
 - **No `severity` field appears in either plan.** Severity/priority belongs in the synthesized prose where it can be expressed contextually (e.g. "warrants safety officer review per SOP"). A structured severity enum is only produced by the separate `triage_only` tool when an explicit classification is needed.
 - **Glob-before-Read pattern**: in both examples, separate Glob and Read steps demonstrate the fault-tolerant pattern. Glob succeeds even when files don't exist; Read errors hard. Pairing them gives the executor a graceful path when references can't be found.
+- **Files reach synthesize as PATHS, not contents.** The synthesize step receives `{{step_id, file_path}}` entries and reads each file itself, server-side. The Glob steps locate the paths; never paste file contents into the synthesize args.
 - **The final two steps are MANDATORY** ({SYNTHESIZE_TOOL_NAME} and {DRAFT_OUTPUT_TOOL_NAME}) — every plan ends with them. The `purpose` and `audience` are derived from the user_intent.
 - `<first match from step N>` and similar markers are args the executor fills in at execution time from prior tool outputs.
 - If the executor's tool list does NOT include some tool (e.g. Bash), you cannot use it. Use only what is listed.
@@ -496,7 +504,7 @@ SYNTHESIZE_SYSTEM = """You are the senior analyst behind the planner. You receiv
 Your synthesis must:
 - Surface the SUBSTANTIVE findings, not just restate the input
 - Compare gathered evidence against any claims in the input (corroborate, contradict, or fill gaps)
-- Flag what the executor was unable to determine (missing files, unreachable APIs, etc.)
+- Flag what the executor was unable to determine (missing files, unreachable APIs, etc.) — a step result reading `[FILE NOT READ by MCP server: ...]` means that file could not be opened; treat it as a gap
 - Be framed around what user_intent actually asked for — different intents call for different analytical lenses
 
 Output a JSON object with this shape:
@@ -509,6 +517,27 @@ Output a JSON object with this shape:
 If the task is incident-shaped and severity/priority is genuinely material to the analysis, express it in prose inside `evidence_summary` or `key_findings` (e.g. "the unaddressed prior recommendation and recurring pattern warrant urgent command attention"). Do NOT include a structured severity field — programmatic severity is the job of the separate `triage_only` tool.
 
 Do NOT include action recommendations — that is the job of a separate downstream tool (draft_output). Stick to ANALYSIS.
+
+---
+TWO OUTPUT MODES.
+
+Normally you output the synthesis JSON described above. But if the gathered evidence is missing something SPECIFIC and RETRIEVABLE that would materially change your synthesis — a referenced document never retrieved, a file the executor failed to locate, a fact a targeted search would settle — you may instead REQUEST it:
+
+{
+  "status": "needs_more_info",
+  "reason": "<1-2 sentences: what is missing and why it changes the synthesis>",
+  "gather_steps": [
+    {"id": int, "intent": str, "tool": str, "args": {...}, "depends_on": [int, ...]}
+  ]
+}
+
+The executor runs your gather_steps and calls synthesize again; earlier evidence is retained server-side, so the next call shows you the FULL accumulated picture. `gather_steps` are DISCOVERY steps only — locating and reading files, searching — never synthesize or draft_output. Use the executor's real tool names.
+
+Choosing the mode:
+- If the missing evidence BLOCKS the user's request — your synthesis would be a non-answer ("cannot determine X because Y was not retrieved") — and Y is a real, named, plausibly-retrievable artifact (a referenced file, a document a step failed to read), you MUST return needs_more_info. Do NOT synthesize a non-answer when one more retrieval round would produce a real one. A step result recording a failed or errored read — or a referenced document that was never opened — is a strong signal to request it (e.g. a Glob to locate it, then a Read).
+- If the missing evidence is peripheral and your synthesis is still substantive without it, note it in `gaps_or_uncertainties` and synthesize.
+- Never request more for inherent uncertainty — something genuinely unknowable, a judgment call, a future outcome. That is always a gap, never a request.
+On the FINAL round you MUST output a synthesis regardless.
 """
 
 SYNTHESIZE_EXAMPLE = """EXAMPLE — a synthesis you would produce for an HMMWV rollover incident:
@@ -543,6 +572,28 @@ YOUR OUTPUT (clean JSON, no preamble, no fences):
 }
 
 Note how the synthesis flags the systemic curve-hazard pattern in `key_findings` and `evidence_summary` without using a structured severity field — the prose makes it clear this warrants urgent command attention.
+
+=== EXAMPLE 2 — requesting more information instead of synthesizing ===
+
+USER INTENT: "produce a compliance memo: does the convoy CONOP comply with the governing convoy SOP?"
+
+STEP RESULTS (excerpts):
+- step 1 (read CONOP): "Single-vehicle HMMWV movement, 50 mph on improved road, hourly comms, solo driver."
+- step 2 (read SOP-3-1_convoy.md): "ERROR: Read failed — no file at the attempted path. SOP contents unknown."
+
+Here the user's request is a COMPLIANCE check, and the governing SOP — a real, named, retrievable document the executor simply failed to locate — was never read. A synthesis here would be a non-answer ("cannot determine compliance because the SOP is missing"). So you request it instead:
+
+YOUR OUTPUT (clean JSON, no preamble, no fences):
+{
+  "status": "needs_more_info",
+  "reason": "The compliance check is impossible without SOP-3-1_convoy.md; step 2's Read failed on a bad path. The file is named and almost certainly present — locate and read it.",
+  "gather_steps": [
+    {"id": 1, "intent": "Locate the governing convoy SOP anywhere in the workspace", "tool": "Glob", "args": {"pattern": "**/*SOP*3-1*convoy*"}, "depends_on": []},
+    {"id": 2, "intent": "Read the SOP once located", "tool": "Read", "args": {"file_path": "<first match from step 1>"}, "depends_on": [1]}
+  ]
+}
+
+Contrast with EXAMPLE 1: there, the gaps (SPC LEE's post-MTF status, cargo recovery) were peripheral — the synthesis was still substantive, so they were noted as `gaps_or_uncertainties` and the synthesis was produced. Request more only when a missing, retrievable artifact BLOCKS the answer.
 """
 
 SYNTHESIZE_USER_TEMPLATE = """{example}
@@ -561,7 +612,9 @@ PLAN EXECUTED:
 STEP RESULTS:
 {step_results}
 
-Respond with ONLY the JSON synthesis. First character `{{`, last character `}}`, no preamble, no markdown fences."""
+{round_directive}
+
+Respond with ONLY the JSON object — a synthesis, or a needs_more_info request. First character `{{`, last character `}}`, no preamble, no markdown fences."""
 
 
 def build_synthesize_messages(
@@ -569,9 +622,23 @@ def build_synthesize_messages(
     input_text: str,
     plan: dict,
     step_results: list[dict],
+    round_num: int = 1,
+    max_rounds: int = 3,
 ) -> list[dict]:
     """Build chat-completions messages for a synthesis call."""
     import json as _json
+
+    if round_num >= max_rounds:
+        round_directive = (
+            f"SYNTHESIS ROUND {round_num} of {max_rounds} — THIS IS THE FINAL ROUND. "
+            "You MUST output a synthesis; a needs_more_info request is not permitted."
+        )
+    else:
+        round_directive = (
+            f"SYNTHESIS ROUND {round_num} of at most {max_rounds}. If specific, "
+            "retrievable evidence is missing, you may return a needs_more_info "
+            "request instead of a synthesis."
+        )
 
     return [
         {"role": "system", "content": SYNTHESIZE_SYSTEM},
@@ -583,6 +650,7 @@ def build_synthesize_messages(
                 input_text=input_text.strip() if input_text else "(no input text — task was open-ended)",
                 plan=_json.dumps(plan, indent=2),
                 step_results=_json.dumps(step_results, indent=2),
+                round_directive=round_directive,
             ),
         },
     ]

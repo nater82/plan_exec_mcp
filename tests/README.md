@@ -50,4 +50,8 @@ opencode run --model org-gptoss/openai/gpt-oss-120b \
    overview for a new contributor."
 ```
 
+If you script these runs (rather than typing them at a terminal), append
+`< /dev/null` — `opencode run` hangs at startup when stdin is a non-TTY
+pipe left open by the launcher. See the root `README.md` "Known quirks".
+
 Captured outputs from prior runs are in `tests/examples/`.
