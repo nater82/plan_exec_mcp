@@ -1,4 +1,8 @@
-mcp>=1.0.0
+# PIN REQUIRED: mcp 2.x renamed FastMCP -> MCPServer and REMOVED mcp.server.fastmcp,
+# which server.py imports. An unpinned install pulls 2.x and fails at import with
+# "No module named 'mcp.server.fastmcp'". Verified 2026-09-01 (fresh venv -> mcp 2.1.1).
+# Lift this pin only together with migrating server.py to the 2.x API.
+mcp>=1.0.0,<2
 requests>=2.31.0
 
 # Document parsing — the MCP reads PDF/Office files server-side so the weak
