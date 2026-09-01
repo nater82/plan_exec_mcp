@@ -1,4 +1,4 @@
-# plan_exec_mcp
+# genai_mcp
 
 An MCP server that exposes Gemini (via genai.mil) as the **cognitive layer**
 for executor agents (GPT-OSS 120B, Gemma 4 31B, etc.) running in OpenCode
@@ -91,8 +91,8 @@ a hand-held walkthrough: [`SETUP.md`](SETUP.md).
 
 ```sh
 # 1. Clone, install, set key
-git clone git@github.com:nater82/plan_exec_mcp.git
-cd plan_exec_mcp
+git clone git@github.com:nater82/genai_mcp.git
+cd genai_mcp
 export GENAI_MIL_API_KEY=your-key   # add to ~/.bashrc to persist
 
 # 2. Interactive setup: venv, deps, global MCP registration, providers,
@@ -220,6 +220,11 @@ Gemini Flash roughly halves their latency at some loss of output quality.
 | `PLANNER_TOOL_STYLE` | `heavy` | `heavy` or `light` tool descriptions. |
 | `PLANNER_HTTP_TIMEOUT` | `180` | Seconds before the genai.mil request times out. |
 | `PLANNER_ALLOW_INFO_REQUESTS` | `1` | When on, `synthesize` may return a `needs_more_info` request that the executor fulfills and re-calls. Set to `0` to force a single-pass synthesis with no round-trip — useful for one-shot runs or latency-sensitive automation where the extra executor turns are undesirable. |
+| `PLANNER_VISION_ENDPOINT` | — | Optional. OpenAI-compatible chat-completions URL of a vision-capable model used to caption images embedded in documents (PDF/DOCX/XLSX/PPTX). Unset → images are extracted but not analyzed. |
+| `PLANNER_VISION_MODEL` | — | Model name to pass with vision calls (e.g. `google/gemma-4-31B-it`). Required alongside `PLANNER_VISION_ENDPOINT`. |
+| `PLANNER_VISION_API_KEY` | — | Optional bearer token for the vision endpoint (omit for endpoints that don't require auth, e.g. internal vLLM). |
+| `PLANNER_VISION_AUTO_CAP` | `5` | Per-document cap on auto-captioned images. Beyond the cap, each image gets a marker that lets `synthesize` request it on demand via `image_caption_requests` in its response. |
+| `PLANNER_VISION_TIMEOUT` | `60` | Seconds per vision call. |
 | `PLANNER_MCP_TOOL_PREFIX` | `planner-mcp-heavy_` | The prefix OpenCode uses for this MCP's tools (matches whatever name you registered it under in `opencode.json`). The planner uses this to name the synthesize/draft steps in plans. If your MCP block is named differently (e.g. `planner-mcp-light` or just `planner`), set this to that name with a trailing underscore. |
 
 ## Design notes

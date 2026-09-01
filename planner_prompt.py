@@ -122,7 +122,13 @@ For draft_output args:
   - "write a one-page brief on X" → purpose="executive_brief", audience="reader_of_brief"
   - "explain what this code does" → purpose="code_explanation", audience="reader_of_code"
   If user_intent is genuinely vague, pick the most plausible fit and let the synthesize/draft steps reflect that uncertainty.
-- For placeholder values in step args (like `<from synthesize step>`), the executor will substitute actual values at execution time — your job is to make the args structure correct and clearly named, not to literally fill in the values."""
+- For placeholder values in step args (like `<from synthesize step>`), the executor will substitute actual values at execution time — your job is to make the args structure correct and clearly named, not to literally fill in the values.
+
+- **save_to_path** (CRITICAL when user names an output file): if the user's request names an output path — an ARTIFACT_DIR, a specific filename like "/tmp/foo.md", an "output to" path, or anywhere the prompt asks for the draft to be saved to disk — include `save_to_path` in draft_output's args. The MCP itself writes the file (it has filesystem access); the executor does NOT need to follow up with a separate write step. Without save_to_path, the draft is returned only as text in `draft_text` and is NOT persisted to disk.
+
+  Do NOT instruct draft_output to "write a file" via `extra_guidance`. The model behind draft_output is a prose generator with no filesystem tools; it will hallucinate a "successfully written" confirmation and no file will exist. Use `save_to_path` for any file-output request.
+
+  Example: if user_intent contains "save the CCIR to $ARTIFACT_DIR/ccir.md", the draft_output step args should include `"save_to_path": "$ARTIFACT_DIR/ccir.md"` (the executor will substitute the actual ARTIFACT_DIR value at execution time)."""
 
 
 def build_planner_system(available_tools: list[dict] | None = None) -> str:
@@ -509,12 +515,30 @@ Your synthesis must:
 
 Output a JSON object with this shape:
 {
-  "key_findings": [string, ...]      // 2-6 substantive findings, each one sentence
+  "key_findings": [
+    {
+      "claim": string,            // one substantive sentence
+      "sources": [string, ...]    // NON-EMPTY list of source IDs — see SOURCES below
+    },
+    ...                           // 2-6 findings total
+  ],
   "evidence_summary": string,        // 2-4 paragraph narrative integrating the evidence
   "gaps_or_uncertainties": [string]  // what couldn't be determined and why
 }
 
-If the task is incident-shaped and severity/priority is genuinely material to the analysis, express it in prose inside `evidence_summary` or `key_findings` (e.g. "the unaddressed prior recommendation and recurring pattern warrant urgent command attention"). Do NOT include a structured severity field — programmatic severity is the job of the separate `triage_only` tool.
+If the task is incident-shaped and severity/priority is genuinely material to the analysis, express it in prose inside `evidence_summary` or as a `claim` in `key_findings` (e.g. "the unaddressed prior recommendation and recurring pattern warrant urgent command attention"). Do NOT include a structured severity field — programmatic severity is the job of the separate `triage_only` tool.
+
+---
+SOURCES — every key_finding must cite the evidence it rests on.
+
+Source IDs come in three forms:
+- `input_text`           — the user's pasted/inline input text
+- `input_file:<path>`    — contents read from one of the provided input_files (the exact path)
+- `step:<id>`            — output of an executed plan step (the step_id verbatim, e.g. `step:3`, or `step:img_caption:/path/doc.pptx#img=7`)
+
+The user message will list AVAILABLE SOURCES for this synthesis — use ONLY IDs from that list, copied verbatim. Do NOT invent IDs, do NOT abbreviate paths, do NOT renumber step IDs.
+
+Each finding's `sources` array must be NON-EMPTY. When a finding rests on multiple sources (a contradiction between two docs, a corroboration across steps), cite all of them. In `evidence_summary`, where a specific fact is load-bearing, weave the source naturally into the prose (e.g. "per the 2026 OPORD…", "step 3's weather pull confirms…") — but the structural citation requirement applies to `key_findings` only.
 
 Do NOT include action recommendations — that is the job of a separate downstream tool (draft_output). Stick to ANALYSIS.
 
@@ -538,6 +562,29 @@ Choosing the mode:
 - If the missing evidence is peripheral and your synthesis is still substantive without it, note it in `gaps_or_uncertainties` and synthesize.
 - Never request more for inherent uncertainty — something genuinely unknowable, a judgment call, a future outcome. That is always a gap, never a request.
 On the FINAL round you MUST output a synthesis regardless.
+
+---
+EMBEDDED IMAGES IN DOCUMENTS.
+
+Documents often contain figures pasted as images (charts, maps, annotated diagrams, snipped graphics preserved for formatting reasons). The MCP extracts those images server-side and auto-captions a small number of them per document; the rest appear in the evidence as markers like:
+
+  [FIGURE 7 (slide 9)]: NOT YET ANALYZED. If this image may be relevant, include {"image_ref": "<path>#img=7"} in `image_caption_requests` in your synthesize response and the MCP will caption it server-side.
+
+To request analysis of one or more un-captioned images, include an `image_caption_requests` field in your response, alongside the synthesis or alongside needs_more_info:
+
+{
+  "image_caption_requests": [
+    {"image_ref": "/abs/path/to/doc.pptx#img=7"},
+    {"image_ref": "/abs/path/to/doc.pptx#img=11"}
+  ],
+  ... (rest of synthesis or needs_more_info as usual) ...
+}
+
+The MCP fulfills these server-side (it never goes back to the executor), appends the captions to your evidence, and re-invokes you with the full picture. This counts as a round.
+
+Be GENEROUS about requesting images whose location or surrounding text suggests they could be relevant to the user's request — a map on the same slide as the operation under discussion, a figure referenced in adjacent text, a chart on a slide that's clearly the substantive payload. The cost is one extra round; the cost of ignoring a relevant figure is silently missing the answer.
+
+Do NOT spray requests across every image just in case. If a document has 200 images and none are obviously relevant to the user's request, don't request any. The principle: any reasonable chance of relevance → request; clear irrelevance (decorative banners, repeated logos, slides on unrelated topics) → skip.
 """
 
 SYNTHESIZE_EXAMPLE = """EXAMPLE — a synthesis you would produce for an HMMWV rollover incident:
@@ -555,15 +602,36 @@ STEP RESULTS (excerpts):
 - step 5 (alert posted): success
 - step 6 (draft): file written
 
+AVAILABLE SOURCES (rendered by the user message for this example):
+- input_text
+- step:1
+- step:2
+- step:3
+- step:4
+- step:5
+- step:6
+
 YOUR OUTPUT (clean JSON, no preamble, no fences):
 {
   "key_findings": [
-    "Driver was within posted speed limit per report, but speed was likely excessive for actual road conditions (saturated surface, sustained rain).",
-    "Prior near-miss NM-2026-09 on this exact curve in similar conditions recommended a speed reduction that was never implemented.",
-    "This is the third documented incident on this curve in 18 months, indicating a recurring environmental hazard, not driver-specific failure.",
-    "Two-person injury with one suspected fracture meets battalion threshold for 15-6 investigation per SOP 7-2-3."
+    {
+      "claim": "Driver was within posted speed limit per report, but speed was likely excessive for actual road conditions (saturated surface, sustained rain).",
+      "sources": ["input_text", "step:3"]
+    },
+    {
+      "claim": "Prior near-miss NM-2026-09 on this exact curve in similar conditions recommended a speed reduction that was never implemented.",
+      "sources": ["step:2"]
+    },
+    {
+      "claim": "This is the third documented incident on this curve in 18 months, indicating a recurring environmental hazard, not driver-specific failure.",
+      "sources": ["step:4"]
+    },
+    {
+      "claim": "Two-person injury with one suspected fracture meets battalion threshold for 15-6 investigation per SOP 7-2-3.",
+      "sources": ["input_text"]
+    }
   ],
-  "evidence_summary": "The original report attributed the rollover to wet conditions and noted the driver was within 5 mph of the posted limit. Cross-referenced evidence substantially elaborates this picture: the same curve was the site of a near-miss four months ago under nearly identical weather, and that prior report's recommendation to reduce the posted speed was not implemented. The pattern grep surfaces two additional prior reports referencing this curve, both also weather-related. The weather data corroborates the report's narrative of saturated road surface.\\n\\nThe injuries are consistent with a low-speed rollover at the reported angle: SGT GARCIA's suspected clavicle fracture matches a typical seatbelt-restrained lateral impact, and SPC LEE's neck pain warrants follow-up for soft-tissue or whiplash injury beyond the initial MTF visit.\\n\\nNothing in the gathered evidence contradicts the report's account of events. The substantive finding is that this is a known curve hazard, repeatedly flagged, and the recommended remediation has not been executed.",
+  "evidence_summary": "The original report attributed the rollover to wet conditions and noted the driver was within 5 mph of the posted limit. Cross-referenced evidence substantially elaborates this picture: NM-2026-09 (step 2) documented a near-miss on the same curve four months ago under nearly identical weather, with a recommendation to reduce the posted speed that was never implemented. The pattern grep (step 4) surfaces two additional prior reports referencing this curve, both also weather-related. The weather pull (step 3) corroborates the report's narrative of saturated road surface.\\n\\nThe injuries are consistent with a low-speed rollover at the reported angle: SGT GARCIA's suspected clavicle fracture matches a typical seatbelt-restrained lateral impact, and SPC LEE's neck pain warrants follow-up for soft-tissue or whiplash injury beyond the initial MTF visit.\\n\\nNothing in the gathered evidence contradicts the report's account of events. The substantive finding is that this is a known curve hazard, repeatedly flagged, and the recommended remediation has not been executed.",
   "gaps_or_uncertainties": [
     "SPC LEE's neck injury status post-MTF unknown — confirm full diagnosis before closing the file.",
     "Vehicle cargo blank ammunition confirmed in report but recovery status unclear; need range-control follow-up.",
@@ -612,6 +680,9 @@ PLAN EXECUTED:
 STEP RESULTS:
 {step_results}
 
+AVAILABLE SOURCES (use these EXACT strings — verbatim — in every `sources` array):
+{available_sources}
+
 {round_directive}
 
 Respond with ONLY the JSON object — a synthesis, or a needs_more_info request. First character `{{`, last character `}}`, no preamble, no markdown fences."""
@@ -622,6 +693,7 @@ def build_synthesize_messages(
     input_text: str,
     plan: dict,
     step_results: list[dict],
+    available_sources: list[str],
     round_num: int = 1,
     max_rounds: int = 3,
 ) -> list[dict]:
@@ -640,6 +712,8 @@ def build_synthesize_messages(
             "request instead of a synthesis."
         )
 
+    sources_block = "\n".join(f"- {s}" for s in available_sources) if available_sources else "- (none — synthesis must still cite, but no sources are available)"
+
     return [
         {"role": "system", "content": SYNTHESIZE_SYSTEM},
         {
@@ -650,6 +724,7 @@ def build_synthesize_messages(
                 input_text=input_text.strip() if input_text else "(no input text — task was open-ended)",
                 plan=_json.dumps(plan, indent=2),
                 step_results=_json.dumps(step_results, indent=2),
+                available_sources=sources_block,
                 round_directive=round_directive,
             ),
         },
@@ -670,9 +745,21 @@ Guidance:
 - Include specific facts from the synthesis — vague drafts are worthless. Use names, dates, numbers, paths, quotes as appropriate.
 - Acknowledge gaps explicitly where they affect the conclusion. Do not paper over uncertainty.
 - Choose format based on purpose: prose for memos and summaries; bullets/sections for CCIRs, BLUF lists, or recommendation sets; structured outline for CONOPs and procedures.
+- The synthesis cites sources per finding (in each `key_findings` entry's `sources` array — values like `input_text`, `input_file:<path>`, `step:<id>`). Where a fact is load-bearing or contested, surface a SHORT citation in the prose. Use the document title or basename only — NOT the absolute path. Examples: "per OPORD 25-08", "(2026 OPORD)", "(oporder_2026.md)", "(step 3)", "(weather pull, step 3)". DO NOT emit absolute paths like "[/tmp/oporder_2026.md]" — strip directories. Do not cite sources the synthesis itself did not cite, and do not invent new ones.
 - Do not invent facts. If the synthesis doesn't support a claim, do not make it.
 
-Output ONLY the draft text itself. No preamble, no metadata, no JSON wrapping. The first line of your response is the first line of the draft.
+CRITICAL — YOUR OUTPUT IS THE DOCUMENT ITSELF, NOT A CONFIRMATION.
+
+Your entire response is the substantive content of the document the user requested. It is NOT a confirmation, status message, or report-about-the-draft.
+
+- If asked for a CCIR, your output is the CCIR text (BLUF, Situation, etc.) — NOT "The CCIR has been drafted."
+- If asked for a memo, your output is the memo text — NOT "The memo is prepared for your review."
+- If asked for an incident write-up, your output is the write-up — NOT "The incident write-up has been generated."
+- Do NOT begin your response with "I have drafted..." / "The draft has been prepared..." / "Below is..." or any other meta-framing.
+- Do NOT end your response with "successfully written to ..." / "prepared for your review" / "ready for transmission" or similar self-referential trailers. The MCP handles file saving separately and reports the saved path itself — your response should contain ZERO references to file paths, ARTIFACT_DIRs, or save operations.
+- Even if the user's task mentions saving the output to a file, your response is still the document content — not a confirmation that the file was saved. The MCP writes the file; you write the document.
+
+Output ONLY the draft text itself. No preamble, no metadata, no JSON wrapping, no trailing meta-confirmations. The first line of your response is the first line of the draft. The last line of your response is the last line of the draft.
 """
 
 DRAFT_USER_TEMPLATE = """Produce a draft with the following parameters:

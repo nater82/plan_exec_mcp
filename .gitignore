@@ -32,3 +32,6 @@ run_*.log
 # Each user substitutes their own paths; don't commit these
 /opencode.json
 /AGENTS.md
+
+# Local backups taken before in-place edits
+*.bak-*

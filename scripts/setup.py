@@ -327,7 +327,7 @@ def main() -> int:
     # output even when output is piped or redirected (not a TTY).
     sys.stdout.reconfigure(line_buffering=True)
 
-    print(f"{BOLD}plan_exec_mcp setup{RESET}")
+    print(f"{BOLD}genai_mcp setup{RESET}")
     print(f"repo root: {REPO_ROOT}")
 
     steps = [

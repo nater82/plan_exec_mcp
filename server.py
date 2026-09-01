@@ -85,7 +85,14 @@ from planner_prompt import (
 
 # ---- Config ---------------------------------------------------------------
 
-ENDPOINT = "https://api.genai.mil/v1/chat/completions"
+# Backend endpoint + auth. Defaults to genai.mil (CUI-cleared) for production.
+# Override via PLANNER_BACKEND_ENDPOINT + PLANNER_BACKEND_API_KEY for TESTING
+# ONLY when evaluating against a non-CUI-cleared backend (e.g. OpenAI). NEVER
+# point a non-cleared backend at CUI content in production — the planner sends
+# the full user_intent + input_text + step_results to whatever endpoint is set.
+ENDPOINT = os.environ.get("PLANNER_BACKEND_ENDPOINT",
+                           "https://api.genai.mil/v1/chat/completions")
+_BACKEND_KEY_ENV = os.environ.get("PLANNER_BACKEND_API_KEY_ENV", "GENAI_MIL_API_KEY")
 DESCRIPTION_STYLE = os.environ.get("PLANNER_TOOL_STYLE", "heavy")
 HTTP_TIMEOUT = float(os.environ.get("PLANNER_HTTP_TIMEOUT", "180"))
 RETRY_ON_VALIDATION_FAILURE = True
@@ -98,6 +105,29 @@ RETRY_ON_VALIDATION_FAILURE = True
 _INFO_REQUESTS_ENABLED = os.environ.get(
     "PLANNER_ALLOW_INFO_REQUESTS", "1"
 ).strip().lower() not in ("0", "false", "no", "off")
+
+# When set (PLANNER_DISABLE_HUMAN_REVIEW=1), force `human_review_required` to
+# False on get_plan and triage_only responses regardless of what the planner
+# model returned. Useful for unattended / headless runs where there is no
+# human at the terminal to honor the flag. The local executor (gpt-oss-120b)
+# in particular non-deterministically stops on this flag; setting this env
+# var keeps such runs flowing.
+_HUMAN_REVIEW_DISABLED = os.environ.get(
+    "PLANNER_DISABLE_HUMAN_REVIEW", "0"
+).strip().lower() in ("1", "true", "yes", "on")
+
+# Optional vision endpoint for captioning images embedded in documents.
+# The MCP extracts images server-side; if PLANNER_VISION_ENDPOINT and
+# PLANNER_VISION_MODEL are set, it auto-captions the first N images per
+# document and exposes the rest as on-demand markers Gemini can request
+# (image_caption_requests in the synthesize response). Unset -> images are
+# extracted but not analyzed; markers say so.
+_VISION_ENDPOINT = os.environ.get("PLANNER_VISION_ENDPOINT", "").strip() or None
+_VISION_MODEL = os.environ.get("PLANNER_VISION_MODEL", "").strip() or None
+_VISION_API_KEY = os.environ.get("PLANNER_VISION_API_KEY", "").strip() or None
+_VISION_AUTO_CAP = max(0, int(os.environ.get("PLANNER_VISION_AUTO_CAP", "5")))
+_VISION_TIMEOUT = float(os.environ.get("PLANNER_VISION_TIMEOUT", "60"))
+_VISION_ENABLED = bool(_VISION_ENDPOINT and _VISION_MODEL)
 
 # Single default; per-tool overrides via PLANNER_MODEL_<TOOL_NAME_UPPER>
 DEFAULT_MODEL = os.environ.get("PLANNER_MODEL", "gemini-3.1-pro-preview")
@@ -241,11 +271,24 @@ if DESCRIPTION_STYLE not in GET_PLAN_DESC:
     DESCRIPTION_STYLE = "heavy"
 
 print(f"[planner-mcp] starting (tool-style={DESCRIPTION_STYLE})", file=sys.stderr)
+print(f"[planner-mcp]   backend: {ENDPOINT}  (auth env: {_BACKEND_KEY_ENV})", file=sys.stderr)
 for _tool, _model in MODELS.items():
     print(f"[planner-mcp]   {_tool}: {_model}", file=sys.stderr)
 print(
     f"[planner-mcp]   synthesize info-requests: "
     f"{'enabled' if _INFO_REQUESTS_ENABLED else 'disabled'}",
+    file=sys.stderr,
+)
+print(
+    f"[planner-mcp]   human_review_required override: "
+    f"{'DISABLED (forced False)' if _HUMAN_REVIEW_DISABLED else 'honored (planner-set value passed through)'}",
+    file=sys.stderr,
+)
+print(
+    f"[planner-mcp]   image vision: "
+    + (f"{_VISION_MODEL} @ {_VISION_ENDPOINT} (auto-cap {_VISION_AUTO_CAP}/doc)"
+       if _VISION_ENABLED
+       else "disabled (set PLANNER_VISION_ENDPOINT + PLANNER_VISION_MODEL)"),
     file=sys.stderr,
 )
 
@@ -370,6 +413,34 @@ def _validate_plan(plan: dict, allowed_tools: set[str]) -> list[str]:
                 elif dep not in seen_ids:
                     errors.append(f"steps[{i}].depends_on references step {dep} which is not defined before this step")
 
+    # draft_output file-write-via-extra_guidance guard: catches the case where
+    # the planner tries to instruct draft_output to write a file via
+    # extra_guidance instead of using save_to_path. Triggers a corrective
+    # retry through _call_with_validation.
+    for i, step in enumerate(steps):
+        if not isinstance(step, dict) or step.get("tool") != DRAFT_OUTPUT_TOOL_NAME:
+            continue
+        args = step.get("args") or {}
+        if not isinstance(args, dict):
+            continue
+        eg = args.get("extra_guidance") or ""
+        has_save = bool(args.get("save_to_path"))
+        if isinstance(eg, str) and not has_save:
+            eg_low = eg.lower()
+            file_write_signals = ("write to ", "save to ", "save the", "write the", ".md", ".txt",
+                                  ".json", ".docx", "/tmp/", "artifact_dir", "$artifact",
+                                  "save_to_path", "written to ", "saved to ")
+            if any(sig in eg_low for sig in file_write_signals):
+                errors.append(
+                    f"steps[{i}] ({DRAFT_OUTPUT_TOOL_NAME}): extra_guidance contains "
+                    "file-write language but `save_to_path` is not set. The model "
+                    "behind draft_output has NO filesystem access; instructions to "
+                    "write/save a file via extra_guidance are silently ignored and "
+                    "no file is ever created. Move the path from extra_guidance into "
+                    "a `save_to_path` arg, e.g. "
+                    '{"args": {..., "save_to_path": "/tmp/foo.md", "extra_guidance": "<other guidance>"}}.'
+                )
+
     return errors
 
 
@@ -423,10 +494,29 @@ def _validate_consult(reply: dict, allowed_tools: set[str]) -> list[str]:
     return errors
 
 
-def _validate_synthesis(parsed: dict, allowed_tools: set[str], final_round: bool = False) -> list[str]:
+def _validate_synthesis(
+    parsed: dict,
+    allowed_tools: set[str],
+    final_round: bool = False,
+    valid_sources: set[str] | None = None,
+) -> list[str]:
     errors: list[str] = []
     if not isinstance(parsed, dict):
         return ["response must be a JSON object"]
+
+    # `image_caption_requests` may appear alongside any other mode; validate shape.
+    icr = parsed.get("image_caption_requests")
+    if icr is not None:
+        if not isinstance(icr, list):
+            errors.append("image_caption_requests, when present, must be a list")
+        else:
+            for i, req in enumerate(icr):
+                if (not isinstance(req, dict)
+                        or not isinstance(req.get("image_ref"), str)
+                        or not req["image_ref"].strip()):
+                    errors.append(f"image_caption_requests[{i}] must be {{'image_ref': '<path>#img=<N>'}}")
+        if errors:
+            return errors
 
     # Mode 2: a request for more information. Not permitted on the final round.
     if parsed.get("status") == "needs_more_info":
@@ -462,9 +552,32 @@ def _validate_synthesis(parsed: dict, allowed_tools: set[str], final_round: bool
     # Mode 1: a synthesis.
     findings = parsed.get("key_findings")
     if not isinstance(findings, list) or not findings:
-        errors.append("key_findings must be a non-empty array")
-    elif not all(isinstance(f, str) and f.strip() for f in findings):
-        errors.append("all key_findings entries must be non-empty strings")
+        errors.append("key_findings must be a non-empty array of {claim, sources} objects")
+    else:
+        valid_sources_set = valid_sources or set()
+        for i, f in enumerate(findings):
+            if not isinstance(f, dict):
+                errors.append(
+                    f"key_findings[{i}] must be an object {{'claim': str, 'sources': [str, ...]}}, "
+                    f"not a bare string — wrap as {{'claim': ..., 'sources': [...]}}"
+                )
+                continue
+            claim = f.get("claim")
+            if not isinstance(claim, str) or not claim.strip():
+                errors.append(f"key_findings[{i}].claim must be a non-empty string")
+            srcs = f.get("sources")
+            if not isinstance(srcs, list) or not srcs:
+                errors.append(f"key_findings[{i}].sources must be a non-empty list of source IDs")
+            else:
+                for j, s in enumerate(srcs):
+                    if not isinstance(s, str) or not s.strip():
+                        errors.append(f"key_findings[{i}].sources[{j}] must be a non-empty string")
+                        continue
+                    if valid_sources_set and s not in valid_sources_set:
+                        errors.append(
+                            f"key_findings[{i}].sources[{j}]={s!r} is not in AVAILABLE SOURCES; "
+                            f"use one of {sorted(valid_sources_set)}"
+                        )
 
     if not isinstance(parsed.get("evidence_summary"), str) or len(parsed["evidence_summary"].strip()) < 100:
         errors.append("evidence_summary must be a substantive string (>=100 chars)")
@@ -499,29 +612,35 @@ def _validate_triage(triage: dict, _allowed_tools: set[str]) -> list[str]:
 
 
 def _call_genai(messages: list[dict], model: str) -> tuple[str | None, str | None]:
-    """Returns (content, error). Exactly one is non-None."""
-    api_key = os.environ.get("GENAI_MIL_API_KEY")
-    if not api_key:
-        return None, "GENAI_MIL_API_KEY environment variable not set in the MCP server process"
+    """Returns (content, error). Exactly one is non-None.
 
+    Backend endpoint and auth env-var name are configurable via
+    PLANNER_BACKEND_ENDPOINT and PLANNER_BACKEND_API_KEY_ENV. Defaults to
+    genai.mil + GENAI_MIL_API_KEY for production CUI use.
+    """
+    api_key = os.environ.get(_BACKEND_KEY_ENV)
+    if not api_key:
+        return None, f"{_BACKEND_KEY_ENV} environment variable not set in the MCP server process"
+
+    payload: dict = {"model": model, "messages": messages, "temperature": 0.1}
     try:
         resp = requests.post(
             ENDPOINT,
             headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-            json={"model": model, "messages": messages, "temperature": 0.1},
+            json=payload,
             timeout=HTTP_TIMEOUT,
         )
     except requests.RequestException as e:
-        return None, f"network error talking to genai.mil: {e}"
+        return None, f"network error talking to backend ({ENDPOINT}): {e}"
 
     if resp.status_code != 200:
-        return None, f"genai.mil returned HTTP {resp.status_code}: {resp.text[:300]}"
+        return None, f"backend returned HTTP {resp.status_code}: {resp.text[:300]}"
 
     try:
         body = resp.json()
         return body["choices"][0]["message"]["content"], None
     except (KeyError, IndexError, ValueError) as e:
-        return None, f"unexpected genai.mil response shape: {e}"
+        return None, f"unexpected backend response shape: {e}"
 
 
 def _resolve_allowed_tools(available_tools: list[dict] | None) -> set[str]:
@@ -554,34 +673,36 @@ _DOC_PARSER_LIB = {
 }
 
 
-def _extract_document_text(path: str, ext: str) -> str:
-    """Parse a binary office/PDF document into plain text.
+def _extract_document_with_images(path: str, ext: str) -> tuple[str, list]:
+    """Parse a document into (text, images).
 
-    Raises ImportError if the format's parsing library is not installed.
+    `images` is a list of (location_str, blob_bytes, content_type) for each
+    embedded picture found. Location is human-readable ("slide 7", "page 3",
+    "document body"). Raises ImportError if the format's parser is missing.
     """
+    images: list[tuple[str, bytes, str]] = []
     if ext == ".pdf":
         from pypdf import PdfReader
         reader = PdfReader(path)
-        return "\n\n".join((page.extract_text() or "") for page in reader.pages)
-    if ext == ".docx":
-        import docx
-        doc = docx.Document(path)
-        parts = [p.text for p in doc.paragraphs]
-        for table in doc.tables:
-            for row in table.rows:
-                parts.append(" | ".join(cell.text for cell in row.cells))
-        return "\n".join(parts)
-    if ext == ".xlsx":
-        import openpyxl
-        wb = openpyxl.load_workbook(path, data_only=True, read_only=True)
-        parts = []
-        for ws in wb.worksheets:
-            parts.append(f"# Sheet: {ws.title}")
-            for row in ws.iter_rows(values_only=True):
-                cells = [str(c) for c in row if c is not None]
-                if cells:
-                    parts.append(" | ".join(cells))
-        return "\n".join(parts)
+        text_parts = []
+        for i, page in enumerate(reader.pages, 1):
+            text_parts.append(page.extract_text() or "")
+            try:
+                for img in page.images:
+                    name = (getattr(img, "name", "") or "").lower()
+                    ct = "image/png"
+                    for sfx, m in (
+                        (".jpg", "image/jpeg"), (".jpeg", "image/jpeg"),
+                        (".gif", "image/gif"), (".bmp", "image/bmp"),
+                        (".webp", "image/webp"), (".tif", "image/tiff"),
+                    ):
+                        if name.endswith(sfx):
+                            ct = m
+                            break
+                    images.append((f"page {i}", img.data, ct))
+            except Exception:  # noqa: BLE001
+                pass
+        return "\n\n".join(text_parts), images
     if ext == ".pptx":
         import pptx
         pres = pptx.Presentation(path)
@@ -594,8 +715,133 @@ def _extract_document_text(path: str, ext: str) -> str:
                         line = "".join(run.text for run in para.runs)
                         if line.strip():
                             parts.append(line)
-        return "\n".join(parts)
+                try:
+                    if shape.shape_type == 13:  # MSO_SHAPE_TYPE.PICTURE
+                        img = shape.image
+                        images.append((f"slide {i}", img.blob, img.content_type))
+                except Exception:  # noqa: BLE001
+                    pass
+        return "\n".join(parts), images
+    if ext == ".docx":
+        import docx
+        doc = docx.Document(path)
+        parts = [p.text for p in doc.paragraphs]
+        for table in doc.tables:
+            for row in table.rows:
+                parts.append(" | ".join(cell.text for cell in row.cells))
+        try:
+            for rel in doc.part.related_parts.values():
+                ct = getattr(rel, "content_type", "")
+                if isinstance(ct, str) and ct.startswith("image/"):
+                    images.append(("document body", rel.blob, ct))
+        except Exception:  # noqa: BLE001
+            pass
+        return "\n".join(parts), images
+    if ext == ".xlsx":
+        import openpyxl
+        # Use the default (not read_only) mode so embedded images are accessible.
+        wb = openpyxl.load_workbook(path, data_only=True)
+        parts = []
+        for ws in wb.worksheets:
+            parts.append(f"# Sheet: {ws.title}")
+            for row in ws.iter_rows(values_only=True):
+                cells = [str(c) for c in row if c is not None]
+                if cells:
+                    parts.append(" | ".join(cells))
+            try:
+                for img in getattr(ws, "_images", []):
+                    blob = None
+                    if hasattr(img, "_data") and callable(img._data):
+                        blob = img._data()
+                    if blob:
+                        images.append((f"sheet '{ws.title}'", blob, "image/png"))
+            except Exception:  # noqa: BLE001
+                pass
+        return "\n".join(parts), images
     raise ValueError(f"no document extractor for {ext}")
+
+
+def _caption_image(image_bytes: bytes, content_type: str = "image/png") -> str:
+    """Send an image to the configured vision endpoint; return its description.
+
+    Returns a clear marker (not a raised exception) if the endpoint is unset or
+    the call fails — so document processing degrades gracefully rather than
+    crashing on a single bad image.
+    """
+    if not _VISION_ENABLED:
+        return "[no vision endpoint configured]"
+    import base64
+    b64 = base64.b64encode(image_bytes).decode()
+    headers = {"Content-Type": "application/json"}
+    if _VISION_API_KEY:
+        headers["Authorization"] = f"Bearer {_VISION_API_KEY}"
+    payload = {
+        "model": _VISION_MODEL,
+        "messages": [{"role": "user", "content": [
+            {"type": "text", "text": (
+                "Describe this image concisely. Transcribe any text exactly. "
+                "Focus on operationally relevant detail (labels, values, "
+                "structure). If the image is decorative or empty, say so briefly."
+            )},
+            {"type": "image_url", "image_url": {"url": f"data:{content_type};base64,{b64}"}},
+        ]}],
+        "max_tokens": 600,
+    }
+    try:
+        resp = requests.post(_VISION_ENDPOINT, headers=headers, json=payload, timeout=_VISION_TIMEOUT)
+        if resp.status_code != 200:
+            return f"[vision endpoint HTTP {resp.status_code}: {resp.text[:200]}]"
+        return resp.json()["choices"][0]["message"]["content"].strip()
+    except Exception as exc:  # noqa: BLE001
+        return f"[vision call failed: {exc}]"
+
+
+def _caption_image_by_ref(image_ref: str) -> str:
+    """Re-extract and caption a specific image by reference ('<path>#img=<N>').
+
+    Used to fulfill image_caption_requests from synthesize: parses the ref,
+    re-opens the document, extracts the Nth image, and captions it.
+    """
+    if not isinstance(image_ref, str) or "#img=" not in image_ref:
+        return f"[invalid image_ref {image_ref!r}: expected '<path>#img=<index>']"
+    path, _, frag = image_ref.partition("#img=")
+    try:
+        index = int(frag)
+    except ValueError:
+        return f"[invalid image index in {image_ref!r}]"
+    ext = os.path.splitext(path)[1].lower()
+    if ext not in _DOC_PARSER_LIB:
+        return f"[image_ref points at {ext or 'unknown'}; only document types are supported]"
+    try:
+        _, images = _extract_document_with_images(os.path.expanduser(path), ext)
+    except Exception as exc:  # noqa: BLE001
+        return f"[could not re-open {path}: {exc}]"
+    if index < 1 or index > len(images):
+        return f"[image_ref {image_ref!r}: index out of range (document has {len(images)} image(s))]"
+    _loc, blob, ct = images[index - 1]
+    return _caption_image(blob, ct)
+
+
+def _compose_with_images(text: str, images: list, doc_path: str) -> str:
+    """Auto-caption the first N images (per-doc cap); mark the rest for on-demand."""
+    if not images:
+        return text
+    lines = [text, "", "--- EMBEDDED IMAGES ---"]
+    for i, (loc, blob, ct) in enumerate(images, 1):
+        if _VISION_ENABLED and i <= _VISION_AUTO_CAP:
+            caption = _caption_image(blob, ct)
+            lines.append(f"[FIGURE {i} ({loc})]: {caption}")
+        elif _VISION_ENABLED:
+            ref = f"{doc_path}#img={i}"
+            lines.append(
+                f"[FIGURE {i} ({loc})]: NOT YET ANALYZED. If this image may be "
+                f"relevant, include {{\"image_ref\": \"{ref}\"}} in "
+                "`image_caption_requests` in your synthesize response and the "
+                "MCP will caption it server-side."
+            )
+        else:
+            lines.append(f"[FIGURE {i} ({loc})]: not analyzed — no vision endpoint configured.")
+    return "\n".join(lines)
 
 
 def _read_file_capped(path: str) -> str:
@@ -610,7 +856,8 @@ def _read_file_capped(path: str) -> str:
     try:
         if ext in _DOC_PARSER_LIB:
             try:
-                text = _extract_document_text(expanded, ext)
+                text, images = _extract_document_with_images(expanded, ext)
+                text = _compose_with_images(text, images, expanded)
             except ImportError:
                 lib = _DOC_PARSER_LIB[ext]
                 print(f"[planner-mcp] cannot parse {ext} — '{lib}' not installed", file=sys.stderr)
@@ -652,6 +899,31 @@ def _resolve_step_result_files(step_results: list) -> list:
         new_entry["content"] = _read_file_capped(entry["file_path"])
         resolved.append(new_entry)
     return resolved
+
+
+def _enumerate_sources(
+    input_text: str | None,
+    input_files: list | None,
+    step_results: list | None,
+) -> list[str]:
+    """Build the canonical list of source IDs the synthesizer may cite."""
+    sources: list[str] = []
+    if input_text and input_text.strip():
+        sources.append("input_text")
+    for p in (input_files or []):
+        sources.append(f"input_file:{p}")
+    seen_steps: set[str] = set()
+    for entry in (step_results or []):
+        if not isinstance(entry, dict):
+            continue
+        sid = entry.get("step_id")
+        if sid is None:
+            continue
+        key = f"step:{sid}"
+        if key not in seen_steps:
+            seen_steps.add(key)
+            sources.append(key)
+    return sources
 
 
 def _effective_input_text(input_text: str | None, input_files: list | None) -> str:
@@ -764,7 +1036,7 @@ def triage_only(input_text: str) -> dict:
         needs_full_planner. On failure, an object with an `error` key.
     """
     messages = build_triage_messages(input_text)
-    return _call_with_validation(
+    result = _call_with_validation(
         messages,
         _extract_json,
         _validate_triage,
@@ -772,6 +1044,9 @@ def triage_only(input_text: str) -> dict:
         allowed_tools=set(),
         model=MODELS["triage_only"],
     )
+    if _HUMAN_REVIEW_DISABLED and isinstance(result, dict) and "error" not in result:
+        result["human_review_required"] = False
+    return result
 
 
 @mcp.tool(description=GET_PLAN_DESC[DESCRIPTION_STYLE])
@@ -860,6 +1135,8 @@ def get_plan(
     )
 
     if "error" not in result:
+        if _HUMAN_REVIEW_DISABLED:
+            result["human_review_required"] = False
         # Store raw input_text + input_files (paths) — not the expanded text —
         # so the session stays small. Consumers re-expand via _effective_input_text.
         sid = _new_session(user_intent, input_text, result, available_tools, input_files)
@@ -968,43 +1245,74 @@ def synthesize(
     if not isinstance(step_results, list):
         return {"error": "step_results must be a list", "stage": "input"}
 
-    # Accumulate evidence across rounds. The executor passes only the NEW
-    # step_results each round; the session retains everything gathered so far,
-    # so synthesize always sees the full picture. needs_more_info requests
-    # require a session — without one, force a single final round.
+    # Accumulate the executor's new step_results into the session once, up front.
+    # (The session retains everything gathered so far, so synthesize always sees
+    # the full picture. needs_more_info requests require a session.)
     if session is not None:
-        accumulated = session.setdefault("step_results", [])
-        accumulated.extend(step_results)
-        all_results = accumulated
-        session["synthesize_rounds"] = session.get("synthesize_rounds", 0) + 1
-        round_num = session["synthesize_rounds"]
-    else:
-        all_results = step_results
-        round_num = MAX_SYNTHESIZE_ROUNDS  # no session: force a final synthesis
+        session.setdefault("step_results", []).extend(step_results)
 
-    # The last round forces a synthesis; so does disabling info-requests entirely.
-    final_round = round_num >= MAX_SYNTHESIZE_ROUNDS or not _INFO_REQUESTS_ENABLED
-
-    # Read any file_path-bearing entries server-side — the executor is
-    # unreliable at ferrying large file contents (it truncates and corrupts).
-    resolved = _resolve_step_result_files(all_results)
     allowed_tools = _resolve_allowed_tools(available_tools)
 
-    messages = build_synthesize_messages(
-        user_intent, input_text, plan, resolved,
-        round_num=round_num, max_rounds=MAX_SYNTHESIZE_ROUNDS,
-    )
-    result = _call_with_validation(
-        messages,
-        _extract_json,
-        lambda parsed, tools: _validate_synthesis(parsed, tools, final_round=final_round),
-        kind="synthesis",
-        allowed_tools=allowed_tools,
-        model=MODELS["synthesize"],
-    )
-    if isinstance(result, dict) and result.get("status") == "needs_more_info":
-        result["session_id"] = session_id
-    return result
+    # Loop: each iteration is one Gemini call. If Gemini returns
+    # image_caption_requests, we caption them server-side and continue —
+    # invisible to the executor. Bounded by MAX_SYNTHESIZE_ROUNDS.
+    while True:
+        if session is not None:
+            session["synthesize_rounds"] = session.get("synthesize_rounds", 0) + 1
+            round_num = session["synthesize_rounds"]
+            all_results = session["step_results"]
+        else:
+            round_num = MAX_SYNTHESIZE_ROUNDS  # no session: force a final synthesis
+            all_results = step_results
+
+        final_round = round_num >= MAX_SYNTHESIZE_ROUNDS or not _INFO_REQUESTS_ENABLED
+        resolved = _resolve_step_result_files(all_results)
+
+        if session is not None:
+            available_sources = _enumerate_sources(
+                session.get("input_text"),
+                session.get("input_files"),
+                resolved,
+            )
+        else:
+            available_sources = _enumerate_sources(input_text, None, resolved)
+        valid_sources_set = set(available_sources)
+
+        messages = build_synthesize_messages(
+            user_intent, input_text, plan, resolved, available_sources,
+            round_num=round_num, max_rounds=MAX_SYNTHESIZE_ROUNDS,
+        )
+        result = _call_with_validation(
+            messages,
+            _extract_json,
+            lambda parsed, tools: _validate_synthesis(
+                parsed, tools, final_round=final_round, valid_sources=valid_sources_set,
+            ),
+            kind="synthesis",
+            allowed_tools=allowed_tools,
+            model=MODELS["synthesize"],
+        )
+
+        # Server-side image-caption requests: caption them and loop, transparently.
+        icr = result.get("image_caption_requests") if isinstance(result, dict) else None
+        if icr and session is not None and not final_round:
+            captions = []
+            for req in icr:
+                if isinstance(req, dict) and isinstance(req.get("image_ref"), str):
+                    ref = req["image_ref"]
+                    captions.append({
+                        "step_id": f"img_caption:{ref}",
+                        "intent": "server-side image caption (from image_caption_requests)",
+                        "content": f"[FIGURE on {ref}]: {_caption_image_by_ref(ref)}",
+                    })
+            if captions:
+                session["step_results"].extend(captions)
+                continue  # re-invoke synthesize with the new captions as evidence
+
+        # Done — return the result to the executor.
+        if isinstance(result, dict) and result.get("status") == "needs_more_info":
+            result["session_id"] = session_id
+        return result
 
 
 @mcp.tool(description=DRAFT_DESC[DESCRIPTION_STYLE])
@@ -1016,6 +1324,7 @@ def draft_output(
     user_intent: str | None = None,
     input_text: str | None = None,
     extra_guidance: str = "",
+    save_to_path: str | None = None,
 ) -> dict:
     """Generate a polished prose draft for a specific purpose and audience.
 
@@ -1033,9 +1342,23 @@ def draft_output(
         input_text: Required if session_id is not provided.
         extra_guidance: Optional additional guidance for the writer (e.g.
             "keep under 200 words", "include grid coordinates", "BLUF format").
+        save_to_path: Optional filesystem path. If provided, the MCP writes
+            `draft_text` to this path after generating it (creating parent
+            dirs as needed). Use this whenever the user's request names an
+            output file, an ARTIFACT_DIR, or otherwise asks for the draft
+            to be saved. The MCP has direct file write access — do NOT
+            instruct draft_output to "write the file" via extra_guidance;
+            use save_to_path instead.
 
     Returns:
-        {"draft_text": "<the draft>", "model": "...", "purpose": "...", "audience": "..."}.
+        {"draft_text": "<the draft>", "model": "...", "purpose": "...",
+         "audience": "...", "saved": true|false} plus "saved_to":
+         "<resolved_path>" on a successful write, or "save_error" plus
+         "delivery_warning" on a failed one. When save_to_path is omitted,
+         "saved" is false and "delivery_warning" says so explicitly.
+         draft_text is always returned regardless of save outcome —
+         receiving it does NOT mean a file exists. Check "saved" before
+         reporting any file as written.
     """
     session = _get_session(session_id)
     if session:
@@ -1048,11 +1371,9 @@ def draft_output(
         return {"error": "synthesis must be a valid synthesis object (from synthesize())", "stage": "input"}
 
     messages = build_draft_messages(purpose, audience, user_intent, input_text, synthesis, extra_guidance)
-    content, err = _call_genai(messages, model=MODELS["draft_output"])
-    if err:
-        return {"error": err, "stage": "transport", "model": MODELS["draft_output"]}
-
-    draft = (content or "").strip()
+    draft, transport_err = _draft_with_validation(messages, save_to_path)
+    if transport_err:
+        return {"error": transport_err, "stage": "transport", "model": MODELS["draft_output"]}
     if len(draft) < 50:
         return {
             "error": "draft is suspiciously short",
@@ -1061,12 +1382,127 @@ def draft_output(
             "draft_preview": draft,
         }
 
-    return {
+    out = {
         "draft_text": draft,
         "model": MODELS["draft_output"],
         "purpose": purpose,
         "audience": audience,
     }
+    if save_to_path:
+        saved, save_err = _write_draft(draft, save_to_path)
+        if save_err:
+            out["saved"] = False
+            out["save_error"] = save_err
+            out["delivery_warning"] = (
+                f"NO FILE WAS WRITTEN: saving to {save_to_path!r} failed ({save_err}). "
+                "draft_text exists only in this response. Write it yourself, or retry "
+                "with a valid save_to_path. Do NOT report the file as written."
+            )
+        else:
+            out["saved"] = True
+            out["saved_to"] = saved
+    else:
+        # 2026-08-20: an omitted save_to_path used to be silent, and executors
+        # read a returned draft_text as proof of delivery and reported the file
+        # as written. Say so loudly instead. See tests/test_delivery_contract.py.
+        out["saved"] = False
+        out["delivery_warning"] = (
+            "NO FILE WAS WRITTEN. save_to_path was not provided, so draft_text "
+            "exists only in this response. If the request names an output file or "
+            "an ARTIFACT_DIR, you MUST either write draft_text to that path "
+            "yourself or call draft_output again with save_to_path set. Do NOT "
+            "tell the user the file was written until it actually exists."
+        )
+    return out
+
+
+_META_CONFIRMATION_RE = re.compile(
+    r"^\s*(the\s+)?(draft|ccir|memo|writeup|write-up|report|summary|brief(ing)?|notification|document|analysis|review)"
+    r"[^.!\n]{0,80}\s+(has\s+been|is\s+now|was)\s+(successfully\s+)?"
+    r"(drafted|generated|prepared|written|saved|created|completed|produced)",
+    re.IGNORECASE,
+)
+
+
+def _detect_meta_confirmation(draft: str, save_to_path: str | None) -> str | None:
+    """Detect if `draft` is a self-referential confirmation rather than the document.
+
+    Returns an error description if the draft looks like a meta-confirmation
+    (Gemini's "the draft has been successfully written to X" failure mode),
+    or None if the draft looks substantive.
+    """
+    if not draft:
+        return "draft_text is empty"
+    stripped = draft.strip()
+    # Very short drafts where we expect a substantive document are suspicious.
+    if len(stripped) < 200 and _META_CONFIRMATION_RE.search(stripped[:200]):
+        return ("draft_text appears to be a meta-confirmation message rather than "
+                "the substantive document content (matched pattern like 'the draft has "
+                "been successfully generated'). Re-emit the actual document content as "
+                "draft_text.")
+    # If the draft references the save path itself, that's a strong signal of
+    # meta-confirmation regardless of length.
+    if save_to_path:
+        from pathlib import Path
+        path_basename = Path(save_to_path).name
+        if save_to_path in stripped or path_basename in stripped[:300]:
+            return (f"draft_text contains a reference to its own save path "
+                    f"({save_to_path!r} or basename {path_basename!r}). The "
+                    "substantive document should never reference its own filesystem "
+                    "path. Re-emit the actual document content; the MCP handles file "
+                    "saving separately and you must not mention the path at all.")
+    return None
+
+
+def _draft_with_validation(messages: list[dict], save_to_path: str | None,
+                            max_attempts: int = 2) -> tuple[str, str | None]:
+    """Call draft model with one corrective retry on meta-confirmation output."""
+    messages = list(messages)
+    last_draft = ""
+    for attempt in range(1, max_attempts + 1):
+        content, err = _call_genai(messages, model=MODELS["draft_output"])
+        if err:
+            return "", err
+        draft = (content or "").strip()
+        last_draft = draft
+        meta_err = _detect_meta_confirmation(draft, save_to_path)
+        if meta_err is None:
+            return draft, None
+        if attempt >= max_attempts:
+            # Out of retries; return what we have. The save still happens; the
+            # quality issue surfaces as a meta-confirmation in the file but the
+            # delivery contract is preserved.
+            print(f"[planner-mcp] draft_output: meta-confirmation detected after "
+                  f"{max_attempts} attempts: {meta_err[:120]}", file=sys.stderr)
+            return draft, None
+        # Append corrective re-prompt and retry.
+        messages = messages + [
+            {"role": "assistant", "content": draft},
+            {"role": "user", "content": (
+                f"REJECTED — {meta_err}\n\n"
+                "Re-emit your response as the SUBSTANTIVE document content. The first "
+                "line should be the first line of the actual document (e.g. a heading "
+                "or BLUF line), not a confirmation message. Do not mention file paths, "
+                "save operations, ARTIFACT_DIRs, or anything about the draft being "
+                "'generated' / 'written' / 'prepared'. The MCP saves the file separately; "
+                "your job is purely to produce the document content itself."
+            )},
+        ]
+    return last_draft, None
+
+
+def _write_draft(text: str, path: str) -> tuple[str | None, str | None]:
+    """Write draft text to disk. Returns (resolved_path, error)."""
+    if not isinstance(path, str) or not path.strip():
+        return None, "save_to_path must be a non-empty string"
+    try:
+        from pathlib import Path
+        dest = Path(os.path.expanduser(path.strip())).resolve()
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text(text, encoding="utf-8")
+    except Exception as exc:  # noqa: BLE001
+        return None, f"could not write to {path!r}: {type(exc).__name__}: {exc}"
+    return str(dest), None
 
 
 if __name__ == "__main__":

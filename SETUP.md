@@ -36,7 +36,7 @@ cd <REPO_DIR>                 # placeholder — the folder name git created
 
 > **Placeholders:** Replace `<REPO_URL>` with the git URL (e.g.
 > `git@github.com:<org>/<repo>.git`) and `<REPO_DIR>` with the folder name
-> it cloned into (e.g. `plan_exec_mcp`). Your office should have shared the
+> it cloned into (e.g. `genai_mcp`). Your office should have shared the
 > exact values.
 
 ## Step 2. Run the setup script

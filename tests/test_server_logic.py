@@ -115,7 +115,10 @@ def main() -> int:
         return 1
     print(f"  key_findings ({len(synth['key_findings'])}):")
     for f in synth["key_findings"]:
-        print(f"    - {f}")
+        if isinstance(f, dict):
+            print(f"    - {f.get('claim')}  [sources: {', '.join(f.get('sources') or [])}]")
+        else:
+            print(f"    - {f}")
     print(f"  evidence_summary (first 200 chars): {synth['evidence_summary'][:200]}")
     print(f"  gaps_or_uncertainties ({len(synth.get('gaps_or_uncertainties', []))}):")
     for g in synth.get("gaps_or_uncertainties", []):

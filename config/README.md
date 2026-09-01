@@ -16,8 +16,8 @@ and adapt.
 
 ```sh
 # 1. Clone, install, set your API key
-git clone git@github.com:nater82/plan_exec_mcp.git ~/plan_exec_mcp
-cd ~/plan_exec_mcp
+git clone git@github.com:nater82/genai_mcp.git ~/genai_mcp
+cd ~/genai_mcp
 python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 export GENAI_MIL_API_KEY=your-key-here
 
@@ -29,7 +29,7 @@ export GENAI_MIL_API_KEY=your-key-here
 python3 scripts/setup.py
 #    Manual alternative — substitute the path, then merge the `mcp` block
 #    into ~/.config/opencode/opencode.json yourself:
-sed "s|__GENAI_MCP_DIR__|$HOME/plan_exec_mcp|g" config/opencode.example.json > /tmp/mcp_snippet.json
+sed "s|__GENAI_MCP_DIR__|$HOME/genai_mcp|g" config/opencode.example.json > /tmp/mcp_snippet.json
 #    Register it GLOBALLY, not as a repo-local opencode.json — a repo-local
 #    file only loads when OpenCode runs from the repo directory itself.
 

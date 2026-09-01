@@ -1,5 +1,8 @@
 # Training Safety Review - 17 May 2026
 
+*[FICTIONAL TEST DATA — synthetic scenario, not a real incident. Model output
+captured during development.]*
+
 ## Incident Summary
 Trainee SMITH, J. was reported overdue at 2230 local during a night land navigation exercise in Training Area 7. The trainee was located at 2310, approximately 400m east of the expected route. The trainee was disoriented and dehydrated but suffered no serious injuries and was released to the unit at 0145.
 

@@ -1,3 +1,5 @@
+[FICTIONAL TEST DATA - all sample reports below are synthetic]
+
 
 ======================================================================
 === trainee_separation ===
