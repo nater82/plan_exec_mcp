@@ -31,6 +31,26 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 VENV_DIR = REPO_ROOT / ".venv"
+
+# Python's venv layout is platform-dependent: Windows puts executables in
+# Scripts/ with .exe suffixes, POSIX puts them in bin/. Everything below goes
+# through these helpers so a native-Windows install works without WSL.
+IS_WINDOWS = os.name == "nt"
+VENV_BIN = VENV_DIR / ("Scripts" if IS_WINDOWS else "bin")
+EXE = ".exe" if IS_WINDOWS else ""
+
+
+def venv_python() -> Path:
+    return VENV_BIN / f"python{EXE}"
+
+
+def venv_pip() -> Path:
+    return VENV_BIN / f"pip{EXE}"
+
+
+def venv_python_display() -> str:
+    """Path as a user should type it, for printed instructions."""
+    return f".venv\\Scripts\\python{EXE}" if IS_WINDOWS else ".venv/bin/python"
 REQUIREMENTS = REPO_ROOT / "requirements.txt"
 
 OPENCODE_TEMPLATE = REPO_ROOT / "config" / "opencode.example.json"
@@ -44,6 +64,7 @@ AGENTS_LOCAL = REPO_ROOT / "AGENTS.md"
 HEALTHCHECK_SCRIPT = REPO_ROOT / "scripts" / "healthcheck.py"
 
 PLACEHOLDER = "__GENAI_MCP_DIR__"
+PYTHON_PLACEHOLDER = "__GENAI_MCP_PYTHON__"
 
 
 # ---- helpers --------------------------------------------------------------
@@ -129,7 +150,7 @@ def step_venv() -> bool:
 
 def step_install_deps() -> bool:
     header("Step 2: Install dependencies")
-    pip = VENV_DIR / "bin" / "pip"
+    pip = venv_pip()
     if not pip.exists():
         err(f"venv pip not found at {pip}. Re-run step 1.")
         return False
@@ -151,7 +172,14 @@ def step_register_mcp() -> bool:
         err(f"template not found: {OPENCODE_TEMPLATE}")
         return False
 
-    template = json.loads(OPENCODE_TEMPLATE.read_text().replace(PLACEHOLDER, str(REPO_ROOT)))
+    # as_posix() on purpose: a Windows path like C:\\Users\\x would be substituted
+    # into JSON *text* before parsing, where the backslashes are invalid escapes
+    # and json.loads() fails. Forward slashes are accepted by Windows Python.
+    template = json.loads(
+        OPENCODE_TEMPLATE.read_text()
+        .replace(PYTHON_PLACEHOLDER, venv_python().as_posix())
+        .replace(PLACEHOLDER, REPO_ROOT.as_posix())
+    )
     mcp_blocks = template.get("mcp", {})
     if not mcp_blocks:
         err("template config/opencode.example.json has no 'mcp' block")
@@ -166,7 +194,7 @@ def step_register_mcp() -> bool:
     if not ask_yes_no("Register the MCP globally?", default=True):
         warn("skipped. To register by hand later, merge the 'mcp' block from")
         print(f"    config/opencode.example.json into {GLOBAL_OPENCODE_CONFIG}")
-        print(f"    (replacing {PLACEHOLDER} with {REPO_ROOT}).")
+        print(f"    (replacing {PLACEHOLDER} with {REPO_ROOT.as_posix()}).")
         return True
 
     GLOBAL_OPENCODE_CONFIG.parent.mkdir(parents=True, exist_ok=True)
@@ -274,12 +302,12 @@ def step_healthcheck() -> bool:
     if not os.environ.get("GENAI_MIL_API_KEY"):
         warn("GENAI_MIL_API_KEY is not set in this shell.")
         print("    Set it now (export GENAI_MIL_API_KEY=...) and re-run this step manually:")
-        print(f"      .venv/bin/python {HEALTHCHECK_SCRIPT.relative_to(REPO_ROOT)}")
+        print(f"      {venv_python_display()} {HEALTHCHECK_SCRIPT.relative_to(REPO_ROOT)}")
         print("    Or add it to your shell rc file:")
         print("      echo 'export GENAI_MIL_API_KEY=your-key' >> ~/.bashrc && source ~/.bashrc")
         return True  # not a hard failure; user just needs to set the key
 
-    python = VENV_DIR / "bin" / "python"
+    python = venv_python()
     if not python.exists():
         err(f"venv python not found at {python}. Re-run step 1.")
         return False
@@ -306,7 +334,7 @@ def print_next_steps() -> None:
     print("    your real executor endpoints. See config/README.md for details.")
     print()
     print("  Run the MCP smoke test (~2-3 min):")
-    print("    .venv/bin/python tests/test_server_logic.py")
+    print(f"    {venv_python_display()} tests/test_server_logic.py")
     print()
     print("  Try a real end-to-end run via OpenCode. The --model you pass is the")
     print("  EXECUTOR — it must be a local/on-prem model, never a genai-mil/gemini")

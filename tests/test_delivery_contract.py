@@ -60,7 +60,12 @@ def main() -> int:
         p = str(Path(td) / "nested" / "compliance_memo.md")
         out = call(save_to_path=p)
         check(out.get("saved") is True, "saved is True")
-        check(out.get("saved_to") == p, "saved_to echoes the resolved path")
+        # Compare resolved paths, not raw strings: on Windows a temp dir may come
+        # back as an 8.3 short path (NATHAN~1.ROL) that .resolve() legitimately
+        # expands, so string equality fails even though the write is correct.
+        same = bool(out.get("saved_to")) and \
+            Path(out["saved_to"]).resolve() == Path(p).resolve()
+        check(same, "saved_to points at the requested file")
         check("delivery_warning" not in out, "no delivery_warning on a real save")
         check(Path(p).exists(), "file actually exists on disk")
         check(Path(p).read_text() == DRAFT, "file content == draft_text")

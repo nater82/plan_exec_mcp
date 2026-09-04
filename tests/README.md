@@ -22,10 +22,12 @@ From the repo root, with a venv set up and `GENAI_MIL_API_KEY` exported:
 
 ```sh
 # Primary smoke test — covers everything
-.venv/bin/python tests/test_server_logic.py
+.venv/bin/python tests/test_server_logic.py        # macOS / Linux / WSL
+.venv\Scripts\python tests\test_server_logic.py   # Windows
 
 # Robustness pass after prompt edits — covers all 5 report categories
-.venv/bin/python tests/test_robustness.py
+.venv/bin/python tests/test_robustness.py          # macOS / Linux / WSL
+.venv\Scripts\python tests\test_robustness.py     # Windows
 ```
 
 Both scripts inject the repo root onto `sys.path` so they can import

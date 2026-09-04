@@ -6,9 +6,13 @@ running, follow the steps below.
 
 ## Before you start, you need
 
-- A working terminal: WSL Ubuntu on Windows, or Terminal on macOS, or any
-  Linux terminal. **If you're on Windows and don't have WSL yet**, follow
-  [docs/WSL_SETUP.md](docs/WSL_SETUP.md) first, then come back here.
+- A working terminal. Any of these is fine:
+  - **Windows, PowerShell** — supported directly; you need Python 3.10+ from
+    python.org (`py --version` should work). Commands below marked *Windows*
+    are the ones to use.
+  - **Windows, WSL Ubuntu** — also fine, and what most of this was developed
+    against. No WSL yet? See [docs/WSL_SETUP.md](docs/WSL_SETUP.md).
+  - **macOS or Linux** — use the plain commands.
 - An API key for `https://api.genai.mil`. Your office should have a
   process for issuing these — ask whoever sent you this repo.
 - About 15 minutes the first time you set it up.
@@ -61,10 +65,22 @@ below** and re-run the script.
 
 ## Step 3. Set your API key (one time, persistent)
 
+**macOS / Linux / WSL:**
+
 ```sh
 echo 'export GENAI_MIL_API_KEY=your-key-here' >> ~/.bashrc
 source ~/.bashrc
 ```
+
+**Windows (PowerShell)** — sets it for your user account, permanently:
+
+```powershell
+[Environment]::SetEnvironmentVariable('GENAI_MIL_API_KEY','your-key-here','User')
+```
+
+Then **open a new terminal**. The variable is read by the MCP server when it
+starts, so a session that was already running keeps the old value — this is a
+common source of confusing 401s after rotating a key.
 
 Replace `your-key-here` with your actual key. **Do NOT put the key in any
 file inside this repo.** `~/.bashrc` is the right place — it's loaded
@@ -176,7 +192,8 @@ If you're stuck, run the healthcheck explicitly and paste the output to
 whoever's helping:
 
 ```sh
-.venv/bin/python scripts/healthcheck.py
+.venv/bin/python scripts/healthcheck.py            # macOS / Linux / WSL
+.venv\Scripts\python scripts\healthcheck.py       # Windows
 ```
 
 ## What to read next

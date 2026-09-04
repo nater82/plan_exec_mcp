@@ -18,11 +18,13 @@ and adapt.
 # 1. Clone, install, set your API key
 git clone git@github.com:nater82/genai_mcp.git ~/genai_mcp
 cd ~/genai_mcp
-python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+python3 -m venv .venv && .venv/bin/pip install -r requirements.txt        # macOS / Linux / WSL
+py -m venv .venv && .venv\Scripts\pip install -r requirements.txt          # Windows
 export GENAI_MIL_API_KEY=your-key-here
 
 # 2. Verify the genai.mil endpoint works for you
-.venv/bin/python scripts/healthcheck.py
+.venv/bin/python scripts/healthcheck.py            # macOS / Linux / WSL
+.venv\Scripts\python scripts\healthcheck.py       # Windows
 
 # 3. Register the MCP in your GLOBAL OpenCode config.
 #    Easiest: let the setup script do it (it merges the mcp block for you):

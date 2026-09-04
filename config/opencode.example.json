@@ -4,7 +4,7 @@
     "planner-mcp-heavy": {
       "type": "local",
       "command": [
-        "__GENAI_MCP_DIR__/.venv/bin/python",
+        "__GENAI_MCP_PYTHON__",
         "__GENAI_MCP_DIR__/server.py"
       ],
       "enabled": true,
@@ -17,7 +17,7 @@
     "planner-mcp-light": {
       "type": "local",
       "command": [
-        "__GENAI_MCP_DIR__/.venv/bin/python",
+        "__GENAI_MCP_PYTHON__",
         "__GENAI_MCP_DIR__/server.py"
       ],
       "enabled": false,
