@@ -32,10 +32,20 @@ running, follow the steps below.
 
 In your terminal:
 
+**macOS / Linux / WSL:**
+
 ```sh
 cd ~
 git clone <REPO_URL>          # placeholder — get this from the repo maintainer
 cd <REPO_DIR>                 # placeholder — the folder name git created
+```
+
+**Windows (PowerShell):**
+
+```powershell
+cd $env:USERPROFILE
+git clone <REPO_URL>
+cd <REPO_DIR>
 ```
 
 > **Placeholders:** Replace `<REPO_URL>` with the git URL (e.g.
@@ -45,16 +55,30 @@ cd <REPO_DIR>                 # placeholder — the folder name git created
 
 ## Step 2. Run the setup script
 
+**macOS / Linux / WSL:**
+
 ```sh
 python3 scripts/setup.py
 ```
+
+**Windows (PowerShell):**
+
+```powershell
+py scripts\setup.py
+```
+
+The script detects your platform and creates the virtualenv in the right
+layout — `.venv/bin/` on macOS/Linux/WSL, `.venv\Scripts\` on Windows — and
+writes the matching interpreter path into your OpenCode config.
 
 This is interactive — it asks before each significant step. It will:
 
 1. Create a Python virtualenv at `.venv/`
 2. Install the MCP server's dependencies
 3. Register the planner-mcp in your **global** OpenCode config
-   (`~/.config/opencode/opencode.json`) — so it loads from any directory
+   (`~/.config/opencode/opencode.json`, or
+   `%USERPROFILE%\.config\opencode\opencode.json` on Windows) — so it loads
+   from any directory
 4. Offer to add the example provider blocks to that same global config
    (a safe merge — it never overwrites providers you already have)
 5. Copy `AGENTS.example.md` to `AGENTS.md`
@@ -99,6 +123,8 @@ did and just run the healthcheck.
 
 If you don't already have OpenCode installed:
 
+**macOS / Linux / WSL** — the CLI:
+
 ```sh
 npm install -g opencode-ai
 opencode --version
@@ -106,6 +132,15 @@ opencode --version
 
 (If `npm` isn't installed, see [docs/WSL_SETUP.md](docs/WSL_SETUP.md) Step 3
 for the Node.js install.)
+
+**Windows** — two options:
+
+- **OpenCode Desktop** (the `.exe` installer). No Node.js needed. It reads the
+  same global config described below, so the rest of this guide applies
+  unchanged. Note it has no `opencode` command line, so the CLI examples in
+  Step 6 become prompts you type into the app.
+- **The CLI**, if you have Node.js for Windows: `npm install -g opencode-ai`,
+  same as above.
 
 ## Step 5. Point the executor providers at your real endpoints
 
@@ -144,10 +179,23 @@ See [config/README.md](config/README.md) for the full provider reference.
 > read your local files or run anything on your device. Gemini is used
 > internally by the MCP — you never select it with `--model`.
 
+**macOS / Linux / WSL:**
+
 ```sh
 opencode run --model org-gptoss/openai/gpt-oss-120b \
   "Process the incident report at tests/test_report.txt and produce a safety-officer notification."
 ```
+
+**Windows (PowerShell)** — note the backtick, not a backslash, for line
+continuation. A `\` at the end of a PowerShell line does not continue it:
+
+```powershell
+opencode run --model org-gptoss/openai/gpt-oss-120b `
+  "Process the incident report at tests/test_report.txt and produce a safety-officer notification."
+```
+
+**Windows (OpenCode Desktop):** paste the prompt text into the app and pick
+the executor model from its model selector.
 
 Or a non-incident task — the MCP works for any research/synthesis/drafting task:
 
@@ -185,6 +233,10 @@ with `"model": "org-gptoss/openai/gpt-oss-120b"` so it defaults correctly.
 | `opencode run` says model not found | Did Step 5 (provider blocks merged into the global config). Restart OpenCode so it picks up the new config. |
 | `opencode run` errors with "Missing authorization" / 401 | Only happens if you use the optional `genai-mil` provider directly. Check that block references `{env:GENAI_MIL_API_KEY}` — exact spelling, underscores included — and that the var is set in your shell. The planner-mcp itself does not use this provider block. |
 | OpenCode runs but doesn't use the MCP | Confirm Step 2 registered it: `grep planner-mcp ~/.config/opencode/opencode.json`. Restart OpenCode — the `mcp` block is read at startup. |
+| **Windows:** MCP tools missing, model claims they're "invoked automatically" | The MCP failed to start and the model is guessing. Almost always the interpreter path: it must be `.venv/Scripts/python.exe`, not `.venv/bin/python`. Use forward slashes in the JSON. |
+| **Windows:** `401` from the planner although the key is set | The key must be in the **Windows** user environment, not a WSL `~/.bashrc` — those are separate environments. Set it with `[Environment]::SetEnvironmentVariable('GENAI_MIL_API_KEY','...','User')` and restart OpenCode. |
+| **Windows:** config edits seem ignored | You may have both `opencode.json` and `opencode.jsonc` in the config folder (OpenCode Desktop creates the `.jsonc` stub). Keep one. |
+| **Windows:** a multi-line command fails | PowerShell continues lines with a backtick `` ` ``, not a backslash `\`. |
 | Files can't be read / "passing files" fails | You're probably running with a remote model as the executor. The `--model` (or interactive default) must be a **local** model — see the callout in Step 6. |
 | MCP runs but Gemini calls time out | Network — confirm you can reach `https://api.genai.mil` from this terminal: `curl -I https://api.genai.mil/v1/models`. |
 

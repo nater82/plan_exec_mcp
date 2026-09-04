@@ -1,9 +1,14 @@
 # WSL setup for Windows users
 
-If you're on a Windows machine and don't yet have a Linux environment, this
-guide gets you to a working prompt where you can clone this repo and run
-the setup script. Target audience: technical but not necessarily a daily
-command-line user.
+> **WSL is optional.** Native Windows is supported — see
+> [SETUP.md](../SETUP.md) and follow the *Windows (PowerShell)* commands.
+> Use this guide if you would rather work in a Linux environment, which is
+> what most of this project was developed and tested against.
+
+If you're on a Windows machine and want a Linux environment, this guide gets
+you to a working prompt where you can clone this repo and run the setup
+script. Target audience: technical but not necessarily a daily command-line
+user.
 
 If you're on macOS or Linux, skip this — you already have a terminal that
 works. Go to the main [README](../README.md).

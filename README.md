@@ -93,12 +93,14 @@ a hand-held walkthrough: [`SETUP.md`](SETUP.md).
 # 1. Clone, install, set key
 git clone git@github.com:nater82/genai_mcp.git
 cd genai_mcp
-export GENAI_MIL_API_KEY=your-key   # add to ~/.bashrc to persist
+export GENAI_MIL_API_KEY=your-key   # macOS/Linux/WSL; add to ~/.bashrc to persist
+# Windows PowerShell:
+#   [Environment]::SetEnvironmentVariable('GENAI_MIL_API_KEY','your-key','User')
 
 # 2. Interactive setup: venv, deps, global MCP registration, providers,
 #    healthcheck. It offers to add the provider blocks for you (a safe merge
 #    that won't touch providers you already have).
-python3 scripts/setup.py
+python3 scripts/setup.py            # Windows: py scripts\setup.py
 
 # 3. Edit the placeholder endpoint URLs that setup added for org-gptoss /
 #    org-gemma in ~/.config/opencode/opencode.json — point them at your
